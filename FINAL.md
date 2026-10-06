@@ -26,13 +26,13 @@ SaaS multi-tenant d'acquisition et d'automatisation marketing piloté par l'IA, 
 Voir [ARCHITECTURE.md](ARCHITECTURE.md). Next.js 16, React 19, TypeScript strict, Tailwind 4, Prisma 6, zod 4.
 
 ## Base de données
-39 modèles (voir `prisma/schema.prisma`) : tous scopés par `workspaceId` avec cascade, index composites, unicités, soft delete. Migration SQLite versionnée (`prisma/migrations`) ; variante PostgreSQL générée (`npm run db:gen-pg`, `prisma/postgres`).
+37 modèles (voir `prisma/schema.prisma`) : tous les modèles métier sont scopés par `workspaceId` avec cascade (User, OAuthAccount, PasswordResetToken et Workspace sont les racines d'identité), index composites, unicités, soft delete. Migration SQLite versionnée (`prisma/migrations`) ; variante PostgreSQL générée (`npm run db:gen-pg`, `prisma/postgres`).
 
 ## Sécurité
 Isolation tenant (testée), bcrypt, rate limiting, CSRF (server actions + SameSite), validation zod partout, XSS (contenu texte échappé, URLs filtrées), en-têtes de sécurité, secrets chiffrés/hachés, quotas IA, entrées IA non fiables encadrées, audit log, logs masqués. Détails : ARCHITECTURE.md.
 
 ## Tests (résultats exacts, exécutés sur le dépôt et sur un clone propre)
-- Vitest (unitaires + intégration, 12 fichiers) : **146 / 146 réussis**.
+- Vitest (unitaires + intégration) : **157 / 157 réussis** (13 fichiers ; 146 avant le passage production + 11 tests de non-régression ajoutés).
 - Playwright E2E (Chrome, 2 fichiers) : **27 / 27 réussis** — parcours complet (inscription → onboarding → landing → campagne → formulaire public → lead → qualification → CRM → analytics → relances → intégrations → facturation → API → RGPD → isolation → abonnement expiré → session) + responsive 375/768/1280 px sur 30+ pages (aucun débordement horizontal, un seul h1, champs étiquetés, navigation clavier, lien d'évitement).
 - `tsc --noEmit` : 0 erreur. ESLint : 0 erreur, 0 avertissement.
 
@@ -42,15 +42,19 @@ Isolation tenant (testée), bcrypt, rate limiting, CSRF (server actions + SameSi
 ## Déploiement et variables d'environnement
 Voir [README.md](README.md) (instructions exactes, tâche cron, PostgreSQL, Stripe, OAuth) et [.env.example](.env.example) (chaque variable documentée).
 
-## Intégrations — état réel
-| Intégration | État |
-|---|---|
-| Base SQLite / PostgreSQL | SQLite testé de bout en bout ; PostgreSQL : schéma et migration générés, **non exécutés contre une instance PostgreSQL dans cet environnement** |
-| IA (OpenAI / Anthropic / Gemini) | Code complet et testé avec fournisseur de test ; **appels réels non vérifiés** (aucune clé disponible). Sans clé : « Configuration requise » |
-| E-mail (Resend) | Code complet, testé avec réponses simulées ; envoi réel non vérifié (aucune clé) |
-| Stripe | Code complet (checkout, portail, changement de plan, webhook signé) testé avec réponses simulées ; **non vérifié contre Stripe** (aucune clé) |
-| Google Analytics / Meta / Google Ads / TikTok | OAuth + synchronisation implémentés, requêtes et mappage testés avec réponses simulées ; **non vérifiés contre les API réelles** (identifiants d'application requis) |
-| Pixels (Meta, GA, TikTok, LinkedIn) | Non disponibles ; UTM/visites/leads mesurés nativement |
+## Intégrations — état réel (passage production)
+Séparation stricte : **code et tests automatisés** (réponses simulées) ≠ **appels réels** (jamais effectués : aucune clé/instance disponible).
+
+| Service | Code et tests automatisés | Validation réelle |
+|---|---|---|
+| PostgreSQL | VALIDÉS : `db:gen-pg` régénère un schéma/migration identiques (aucun diff Git) ; la migration `prisma/postgres/migrations/0001_init` a été appliquée sur un moteur PostgreSQL 18 embarqué (PGlite, hors dépôt) : 37 tables, 72 clés étrangères, cascade et unicité vérifiées ; client PostgreSQL généré automatiquement si `DATABASE_URL` commence par `postgres` ; recherche insensible à la casse adaptée (`containsCi`) | **PostgreSQL — Configuration requise / validation réelle impossible sans instance PostgreSQL.** Prisma Client n'a pas été exécuté contre un serveur PostgreSQL |
+| IA (OpenAI / Anthropic / Gemini) | VALIDÉS : clé absente → « Configuration requise » (E2E), erreurs typées, quotas par plan/jour et par minute, jetons journalisés, coût jamais inventé (null sans tarif), sortie validée, contenu étiqueté IA, injection de prompt encadrée | **Appels réels aux fournisseurs : NON VALIDÉS — clé requise** |
+| Resend / e-mail | VALIDÉS : aucun envoi sans fournisseur, sans autorisation de séquence, sans consentement, ni pour un désinscrit/supprimé ; liste de suppression ; List-Unsubscribe ; séquences J0–J14 ; idempotence (3 exécutions = 1 e-mail) | **Resend — Configuration requise / envoi réel non validé** |
+| Stripe | VALIDÉS : checkout, portail, changement de plan, downgrade bloqué, annulation/reprise, expiration, webhook signé et idempotent, erreurs sans effet local, pas d'effet inter-espaces | **Stripe — Configuration requise / validation Stripe réelle non effectuée** (aucun paiement réel) |
+| Google Analytics, Meta Ads, Google Ads, TikTok Ads | VALIDÉS : architecture Provider, connect/disconnect/status/refresh/sync, états expiré/erreur, mappage, synchronisation idempotente, chiffrement des identifiants, isolation par espace, aucune donnée factice | **Configuration requise / OAuth réel non validé** (aucun compte publicitaire connecté) |
+| Pixels (Meta, GA, TikTok, LinkedIn) | Non disponibles ; UTM/visites/leads mesurés nativement | — |
+
+Vérifications internes de ce passage : attribution UTM → visite → lead → campagne → qualification → CRM → revenu → KPI (calculés, `—` quand non calculables) ; isolation entre deux espaces (interface, API, identifiant direct, clé API, analytics, campagnes, leads, CRM, abonnement, désinscription, webhook Stripe) ; jeton de réinitialisation à usage unique ; aucun secret dans Git, `.env` ignoré, toutes les variables lues par le code documentées dans `.env.example`. Aucune faille réelle n'a été découverte lors de ce passage ; aucun correctif de code n'a été nécessaire (seule une erreur de documentation — nombre de modèles — a été corrigée).
 
 ## Limites (imposées par des services externes)
 Les comptes et clés suivants doivent être fournis par le propriétaire du produit : fournisseur d'IA, Resend, Stripe (clés + prix + webhook), applications OAuth Google/Meta/TikTok (+ token développeur Google Ads), domaine/hébergeur PostgreSQL, informations légales (`LEGAL_ENTITY_NAME`, `LEGAL_CONTACT_EMAIL`). Les textes légaux sont une base à faire valider juridiquement. Le rate limiting en mémoire convient à une instance unique.

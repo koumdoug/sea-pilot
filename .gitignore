@@ -1,8 +1,8 @@
 # dépendances et builds
 node_modules
 .next
-out
-build
+/out
+/build
 *.tsbuildinfo
 next-env.d.ts
 

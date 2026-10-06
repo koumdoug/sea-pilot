@@ -1,0 +1,30 @@
+# dépendances et builds
+node_modules
+.next
+out
+build
+*.tsbuildinfo
+next-env.d.ts
+
+# secrets et configuration locale — ne jamais committer
+.env
+.env.*
+!.env.example
+
+# bases de données locales
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# tests
+coverage
+playwright-report
+test-results
+
+# divers
+.DS_Store
+Thumbs.db
+*.log
+.vercel
+.claude/

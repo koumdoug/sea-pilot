@@ -32,7 +32,7 @@ Voir [ARCHITECTURE.md](ARCHITECTURE.md). Next.js 16, React 19, TypeScript strict
 Isolation tenant (testée), bcrypt, rate limiting, CSRF (server actions + SameSite), validation zod partout, XSS (contenu texte échappé, URLs filtrées), en-têtes de sécurité, secrets chiffrés/hachés, quotas IA, entrées IA non fiables encadrées, audit log, logs masqués. Détails : ARCHITECTURE.md.
 
 ## Tests (résultats exacts, exécutés sur le dépôt et sur un clone propre)
-- Vitest (unitaires + intégration) : **157 / 157 réussis** (13 fichiers ; 146 avant le passage production + 11 tests de non-régression ajoutés).
+- Vitest (unitaires + intégration) : **164 / 164 réussis** (14 fichiers ; 146 initiaux + 11 tests du passage production + 7 tests d'idempotence).
 - Playwright E2E (Chrome, 2 fichiers) : **27 / 27 réussis** — parcours complet (inscription → onboarding → landing → campagne → formulaire public → lead → qualification → CRM → analytics → relances → intégrations → facturation → API → RGPD → isolation → abonnement expiré → session) + responsive 375/768/1280 px sur 30+ pages (aucun débordement horizontal, un seul h1, champs étiquetés, navigation clavier, lien d'évitement).
 - `tsc --noEmit` : 0 erreur. ESLint : 0 erreur, 0 avertissement.
 
@@ -41,6 +41,24 @@ Isolation tenant (testée), bcrypt, rate limiting, CSRF (server actions + SameSi
 
 ## Déploiement et variables d'environnement
 Voir [README.md](README.md) (instructions exactes, tâche cron, PostgreSQL, Stripe, OAuth) et [.env.example](.env.example) (chaque variable documentée).
+
+## Statut final
+
+### VALIDÉ (vérifié par commandes exécutées)
+Architecture · code · TypeScript (0 erreur) · ESLint (0 erreur, 0 avertissement) · tests automatisés (164/164) · E2E Chrome (27/27) · build de production · sécurité · isolation multi-tenant · RGPD · analytics internes (UTM, visites, leads, attribution, KPI) · cron/idempotence · Prisma · SQLite de bout en bout · préparation PostgreSQL (génération + migration appliquée sur moteur PostgreSQL embarqué).
+
+### CONFIGURATION REQUISE / VALIDATION RÉELLE À FAIRE
+PostgreSQL serveur réel · OpenAI / Anthropic / Gemini · Resend · Stripe · Google Ads (et Google Analytics) · Meta Ads · TikTok Ads. Détail ci-dessous : ce qui est testé automatiquement (réponses simulées) et ce qui exige encore des identifiants ou une infrastructure réelle. Aucune simulation n'est présentée comme validation réelle.
+
+## Cron et automatisations — idempotence (point 13)
+Garanties vérifiées par tests (`tests/idempotence.test.ts`, `tests/followups.test.ts`, `tests/production-readiness.test.ts`) : réservation atomique de chaque relance (`pending → running`) ; crons simultanés = chaque étape J0/J1/J3/J7/J14 exécutée exactement une fois ; lead devenu client / perdu / disqualifié / désinscrit entre deux exécutions = plus aucun effet ; erreur du fournisseur d'e-mail = pas de renvoi (tâche manuelle, journal `failed`) ; rejeu du webhook Stripe sans effet ; un événement Stripe ne touche pas un autre espace.
+
+**Défauts réels trouvés et corrigés pendant ce passage** (chacun avec test de non-régression) :
+1. Inscriptions simultanées d'un même lead à une séquence créaient des relances en double → identifiants déterministes (séquence:lead:génération:étape), la seconde insertion est refusée par la clé primaire (valable SQLite et PostgreSQL).
+2. Rejouer le passage à « Gagné » (retry, double clic) dupliquait l'événement `customer_won` et l'historique → un rejeu est désormais sans effet ; une correction de montant met à jour le revenu du client sans nouvel événement.
+3. Désinscrire deux fois dupliquait la trace de consentement retiré et l'activité → opération idempotente.
+
+Comportement assumé (au plus une fois) : si le processus s'interrompt entre la réservation et la fin d'une relance, celle-ci reste « running » et n'est jamais rejouée automatiquement, afin de ne jamais envoyer deux e-mails.
 
 ## Intégrations — état réel (passage production)
 Séparation stricte : **code et tests automatisés** (réponses simulées) ≠ **appels réels** (jamais effectués : aucune clé/instance disponible).

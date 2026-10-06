@@ -48,12 +48,20 @@ export async function enrollLead(p: { workspaceId: string; leadId: string; seque
   if (existing) return { enrolled: false, reason: "Déjà inscrit à cette séquence." };
   const steps = parseSteps(seq.steps);
   if (!steps.length) return { enrolled: false, reason: "La séquence ne contient aucune étape valide." };
-  await db.followUp.createMany({
-    data: steps.map((s, idx) => ({
-      workspaceId: p.workspaceId, leadId: lead.id, sequenceId: seq.id, stepIndex: idx, action: s.action, payload: s as unknown as Prisma.InputJsonValue,
-      dueAt: new Date(now.getTime() + s.day * 86_400_000), status: "pending",
-    })),
-  });
+  // Identifiants déterministes (séquence:lead:génération:étape) : deux inscriptions simultanées calculent la même génération,
+  // la seconde insertion viole la clé primaire et est refusée — pas de doublon même sans transaction (SQLite comme PostgreSQL).
+  const generation = await db.followUp.count({ where: { workspaceId: p.workspaceId, leadId: lead.id, sequenceId: seq.id } });
+  try {
+    await db.followUp.createMany({
+      data: steps.map((s, idx) => ({
+        id: `fu:${seq.id}:${lead.id}:${generation}:${idx}`, workspaceId: p.workspaceId, leadId: lead.id, sequenceId: seq.id, stepIndex: idx, action: s.action, payload: s as unknown as Prisma.InputJsonValue,
+        dueAt: new Date(now.getTime() + s.day * 86_400_000), status: "pending",
+      })),
+    });
+  } catch (e) {
+    if ((e as { code?: string }).code === "P2002") return { enrolled: false, reason: "Déjà inscrit à cette séquence." };
+    throw e;
+  }
   await db.leadActivity.create({ data: { workspaceId: p.workspaceId, leadId: lead.id, type: "followup", data: { sequence: seq.name, steps: steps.length } } });
   return { enrolled: true, count: steps.length };
 }

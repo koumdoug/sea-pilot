@@ -110,7 +110,16 @@ export async function changeLeadStatus(p: { workspaceId: string; leadId: string;
   const status = p.status as LeadStatus;
   const lead = await db.lead.findFirst({ where: { id: p.leadId, workspaceId: p.workspaceId, deletedAt: null } });
   if (!lead) throw new LeadError("Prospect introuvable.");
-  if (lead.status === status && p.value === undefined) return lead;
+  if (lead.status === status) {
+    // Rejeu (retry, double clic) : aucun nouvel événement ni historique. Seule une correction de montant d'un lead gagné est appliquée.
+    if (status === "won" && p.value !== undefined && p.value !== null && p.value !== lead.value) {
+      const u = await db.lead.update({ where: { id: lead.id }, data: { value: p.value } });
+      if (u.customerId) await db.customer.updateMany({ where: { id: u.customerId, workspaceId: p.workspaceId }, data: { revenue: p.value } });
+      await audit({ workspaceId: p.workspaceId, userId: p.actorId, action: "lead.value_corrected", entity: "Lead", entityId: lead.id });
+      return u;
+    }
+    return lead;
+  }
 
   const now = new Date();
   const data: Prisma.LeadUpdateInput = { status };
@@ -235,6 +244,7 @@ export async function qualifyLeadService(p: { workspaceId: string; leadId: strin
 export async function unsubscribeLead(workspaceId: string, leadId: string, source = "link") {
   const lead = await db.lead.findFirst({ where: { id: leadId, workspaceId } });
   if (!lead) return false;
+  if (lead.unsubscribedAt) return true; // déjà désinscrit : idempotent
   const now = new Date();
   await db.lead.update({ where: { id: lead.id }, data: { unsubscribedAt: now, consentMarketing: false } });
   if (lead.email) {

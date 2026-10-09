@@ -374,6 +374,57 @@ test.describe.serial("parcours client SEA Pilot", () => {
     await expect(page.getByText("Marie Durand")).toHaveCount(0);
   });
 
+  test("portefeuille : catalogue à confirmer, prospect bloqué tant que le produit n'est pas commercialisé, isolation", async () => {
+    await page.goto("/portfolio");
+    await page.getByRole("button", { name: /Créer les fiches DriverPilot, FreelanceNexa et OperaPilot/ }).click();
+    await expect(page.getByRole("link", { name: "DriverPilot" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "OperaPilot" })).toBeVisible();
+    const sub = await page.getByRole("link", { name: "FreelanceNexa" });
+    await expect(sub).toBeVisible();
+    // canaux désactivés par défaut
+    await expect(page.getByText("Désactivé").first()).toBeVisible();
+
+    await page.goto("/prospects");
+    await page.locator('select[name="productId"]').selectOption({ label: "DriverPilot" });
+    await field(page, "Nom").fill("Chauffeur Test");
+    await field(page, "Société").fill("Taxi Test");
+    await field(page, "Courriel professionnel public").fill(`prospect.${stamp}@exemple-prospect.test`);
+    await field(page, "Provenance (où l'avez-vous trouvé ?)").fill("Site public de l'entreprise");
+    await field(page, "Base de contact").selectOption("implied_published");
+    await page.getByRole("button", { name: "Enregistrer" }).click();
+    await expect(page.getByText("Prospect enregistré.")).toBeVisible();
+
+    const pr = await db.prospect.findFirstOrThrow({ where: { name: "Chauffeur Test" } });
+    await page.goto(`/prospects/${pr.id}`);
+    await expect(page.getByText("Bloqué").first()).toBeVisible();
+    await expect(page.getByText(/n'est pas en commercialisation/).first()).toBeVisible();
+
+    // doublon : la même personne n'est pas recréée
+    await page.goto("/prospects");
+    await page.locator('select[name="productId"]').selectOption({ label: "FreelanceNexa" });
+    await field(page, "Nom").fill("Chauffeur Test Bis");
+    await field(page, "Courriel professionnel public").fill(`PROSPECT.${stamp}@exemple-prospect.test`);
+    await field(page, "Provenance (où l'avez-vous trouvé ?)").fill("Annuaire public");
+    await page.getByRole("button", { name: "Enregistrer" }).click();
+    await expect(page.getByText(/existe déjà/)).toBeVisible();
+    expect(await db.prospect.count({ where: { email: `prospect.${stamp}@exemple-prospect.test` } })).toBe(1);
+
+    // import CSV : vérification sans enregistrement
+    await page.goto("/prospects");
+    await page.locator('input[name="file"]').setInputFiles({ name: "p.csv", mimeType: "text/csv", buffer: Buffer.from("nom;courriel;source;date de collecte\nA;a@exemple-prospect.test;Registre public;2026-10-01\n") });
+    await page.getByRole("button", { name: "Lancer" }).click();
+    await expect(page.getByText(/Rien n'a été enregistré/)).toBeVisible();
+    expect(await db.prospect.count({ where: { email: "a@exemple-prospect.test" } })).toBe(0);
+
+    // isolation : une fiche produit d'un autre espace est introuvable
+    const other = await db.workspace.findFirstOrThrow({ where: { slug: state.wsSlug } });
+    const foreign = await db.product.create({ data: { workspaceId: other.id, slug: "etranger", name: "Produit étranger" } });
+    await page.goto(`/products/${foreign.id}`);
+    await expect(page.getByText("Page introuvable")).toBeVisible();
+    await page.goto(`/prospects/${foreign.id}`);
+    await expect(page.getByText("Page introuvable")).toBeVisible();
+  });
+
   test("abonnement : essai expiré = accès suspendu hors facturation ; session expirée = reconnexion", async () => {
     await page.goto("/dashboard");
     await db.subscription.updateMany({ where: { workspace: { memberships: { some: { user: { email: B.email } } } } }, data: { trialEndsAt: new Date(Date.now() - 86_400_000) } });

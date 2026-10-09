@@ -112,6 +112,14 @@ model Workspace {
   consents            Consent[]
   suppressions        EmailSuppression[]
   emailLogs           EmailLog[]
+  products            Product[]
+  prospects           Prospect[]
+  prospectProducts    ProspectProduct[]
+  prospectContacts    ProspectContact[]
+  messageTemplates    MessageTemplate[]
+  outreachChannels    OutreachChannel[]
+  outreachCampaigns   OutreachCampaign[]
+  productEvents       ProductEvent[]
 }
 
 model Membership {
@@ -178,6 +186,7 @@ model MarketResearch {
 model Audience {
   id           String     @id @default(cuid())
   workspaceId  String
+  productId    String? // SaaS du portefeuille concerné (null = non attribué)
   name         String
   type         String     @default("b2c") // b2b | b2c
   customerType String?
@@ -195,24 +204,25 @@ model Audience {
 }
 
 model Offer {
-  id              String     @id @default(cuid())
+  id              String        @id @default(cuid())
   workspaceId     String
+  productId       String? // SaaS du portefeuille concerné (null = non attribué)
   audienceId      String?
   name            String
   description     String?
   problem         String?
   price           Float?
-  currency        String     @default("EUR")
+  currency        String        @default("EUR")
   marginPct       Float?
   geoZone         String?
   advantages      Json? // string[]
   differentiation String?
   variants        Json? // propositions générées par l'IA (Offer Builder)
-  status          String     @default("draft") // draft | active | archived
-  createdAt       DateTime   @default(now())
-  updatedAt       DateTime   @updatedAt
-  workspace       Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  audience        Audience?  @relation(fields: [audienceId], references: [id], onDelete: SetNull)
+  status          String        @default("draft") // draft | active | archived
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  workspace       Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  audience        Audience?     @relation(fields: [audienceId], references: [id], onDelete: SetNull)
   campaigns       Campaign[]
   landingPages    LandingPage[]
 
@@ -222,39 +232,40 @@ model Offer {
 // ───────────────────────── Campagnes & publicité ─────────────────────────
 
 model Campaign {
-  id               String    @id @default(cuid())
+  id               String       @id @default(cuid())
   workspaceId      String
+  productId        String? // SaaS du portefeuille concerné (null = non attribué)
   name             String
-  objective        String    @default("leads") // leads | sales | traffic | awareness
-  platform         String    @default("google_ads")
+  objective        String       @default("leads") // leads | sales | traffic | awareness
+  platform         String       @default("google_ads")
   budget           Float?
-  budgetType       String    @default("monthly") // daily | monthly | total
+  budgetType       String       @default("monthly") // daily | monthly | total
   startDate        DateTime?
   endDate          DateTime?
-  status           String    @default("draft") // draft | ready | active | paused | completed | archived
+  status           String       @default("draft") // draft | ready | active | paused | completed | archived
   offerId          String?
   audienceId       String?
   landingPageId    String?
   message          Json? // angle, valeur, CTA, objections, hypothèses de test
   tracking         Json? // utm par défaut
-  builderStep      Int       @default(1)
+  builderStep      Int          @default(1)
   duplicatedFromId String?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
-  workspace        Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  offer            Offer?    @relation(fields: [offerId], references: [id], onDelete: SetNull)
-  audience         Audience? @relation(fields: [audienceId], references: [id], onDelete: SetNull)
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+  workspace        Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  offer            Offer?       @relation(fields: [offerId], references: [id], onDelete: SetNull)
+  audience         Audience?    @relation(fields: [audienceId], references: [id], onDelete: SetNull)
   landingPage      LandingPage? @relation("CampaignLanding", fields: [landingPageId], references: [id], onDelete: SetNull)
 
-  leads        Lead[]
-  customers    Customer[]
-  ads          Ad[]
-  keywords     Keyword[]
-  metrics      Metric[]
-  adCampaigns  AdCampaign[]
-  events       AnalyticsEvent[]
-  pagesLinked  LandingPage[] @relation("PageCampaign")
-  generations  AIGeneration[]
+  leads       Lead[]
+  customers   Customer[]
+  ads         Ad[]
+  keywords    Keyword[]
+  metrics     Metric[]
+  adCampaigns AdCampaign[]
+  events      AnalyticsEvent[]
+  pagesLinked LandingPage[]    @relation("PageCampaign")
+  generations AIGeneration[]
 
   @@index([workspaceId, status])
 }
@@ -297,7 +308,7 @@ model AdCampaign {
 }
 
 model Ad {
-  id           String      @id @default(cuid())
+  id           String        @id @default(cuid())
   workspaceId  String
   campaignId   String?
   adCampaignId String?
@@ -310,14 +321,14 @@ model Ad {
   primaryText  String?
   description  String?
   cta          String?
-  status       String      @default("draft") // draft | ready | active | paused | archived
-  isWinner     Boolean     @default(false)
-  source       String      @default("user") // user | ai
-  createdAt    DateTime    @default(now())
-  updatedAt    DateTime    @updatedAt
-  workspace    Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  campaign     Campaign?   @relation(fields: [campaignId], references: [id], onDelete: SetNull)
-  adCampaign   AdCampaign? @relation(fields: [adCampaignId], references: [id], onDelete: SetNull)
+  status       String        @default("draft") // draft | ready | active | paused | archived
+  isWinner     Boolean       @default(false)
+  source       String        @default("user") // user | ai
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  workspace    Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  campaign     Campaign?     @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  adCampaign   AdCampaign?   @relation(fields: [adCampaignId], references: [id], onDelete: SetNull)
   generation   AIGeneration? @relation(fields: [generationId], references: [id], onDelete: SetNull)
 
   @@index([workspaceId, platform])
@@ -365,6 +376,7 @@ model Metric {
 model LandingPage {
   id             String    @id @default(cuid())
   workspaceId    String
+  productId      String? // SaaS du portefeuille concerné (null = non attribué)
   name           String
   slug           String
   status         String    @default("draft") // draft | published | archived
@@ -386,7 +398,7 @@ model LandingPage {
   forms     Form[]
   leads     Lead[]
   events    AnalyticsEvent[]
-  campaigns Campaign[] @relation("CampaignLanding")
+  campaigns Campaign[]       @relation("CampaignLanding")
 
   @@unique([workspaceId, slug])
   @@index([workspaceId, status])
@@ -414,14 +426,15 @@ model Form {
 // ───────────────────────── Leads, CRM ─────────────────────────
 
 model Lead {
-  id                 String    @id @default(cuid())
+  id                 String       @id @default(cuid())
   workspaceId        String
+  productId          String? // SaaS du portefeuille concerné (null = non attribué)
   name               String
   email              String?
   phone              String?
   company            String?
   message            String?
-  status             String    @default("new") // new | contacted | qualified | proposal | won | lost | disqualified
+  status             String       @default("new") // new | contacted | qualified | proposal | won | lost | disqualified
   source             String? // utm_source ou origine déclarée
   medium             String?
   score              Int?
@@ -441,7 +454,7 @@ model Lead {
   referrer           String?
   landingUrl         String?
   customFields       Json?
-  consentMarketing   Boolean   @default(false)
+  consentMarketing   Boolean      @default(false)
   consentAt          DateTime?
   consentText        String?
   ipHash             String?
@@ -450,8 +463,8 @@ model Lead {
   wonAt              DateTime?
   lostAt             DateTime?
   deletedAt          DateTime?
-  createdAt          DateTime  @default(now())
-  updatedAt          DateTime  @updatedAt
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
   workspace          Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   campaign           Campaign?    @relation(fields: [campaignId], references: [id], onDelete: SetNull)
   landingPage        LandingPage? @relation(fields: [landingPageId], references: [id], onDelete: SetNull)
@@ -579,37 +592,37 @@ model AIQualification {
 // ───────────────────────── Relances & tâches ─────────────────────────
 
 model FollowUpSequence {
-  id             String    @id @default(cuid())
-  workspaceId    String
-  name           String
-  description    String?
-  steps          Json // [{day, action, subject?, body?, title?, status?}]
-  active         Boolean   @default(true)
-  autoEnroll     Boolean   @default(false) // inscrire automatiquement les nouveaux leads
-  sendEmails     Boolean   @default(false) // consentement explicite de l'espace de travail à l'envoi réel d'e-mails
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
-  workspace      Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  followUps      FollowUp[]
+  id          String     @id @default(cuid())
+  workspaceId String
+  name        String
+  description String?
+  steps       Json // [{day, action, subject?, body?, title?, status?}]
+  active      Boolean    @default(true)
+  autoEnroll  Boolean    @default(false) // inscrire automatiquement les nouveaux leads
+  sendEmails  Boolean    @default(false) // consentement explicite de l'espace de travail à l'envoi réel d'e-mails
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  workspace   Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  followUps   FollowUp[]
 
   @@index([workspaceId])
 }
 
 model FollowUp {
-  id          String    @id @default(cuid())
+  id          String            @id @default(cuid())
   workspaceId String
   leadId      String
   sequenceId  String?
-  stepIndex   Int       @default(0)
+  stepIndex   Int               @default(0)
   action      String // email | task | reminder | status_change
   payload     Json?
   dueAt       DateTime
-  status      String    @default("pending") // pending | done | skipped | cancelled | failed | blocked
+  status      String            @default("pending") // pending | done | skipped | cancelled | failed | blocked
   executedAt  DateTime?
   result      String?
-  createdAt   DateTime  @default(now())
-  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  lead        Lead      @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  createdAt   DateTime          @default(now())
+  workspace   Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  lead        Lead              @relation(fields: [leadId], references: [id], onDelete: Cascade)
   sequence    FollowUpSequence? @relation(fields: [sequenceId], references: [id], onDelete: SetNull)
 
   @@index([workspaceId, status, dueAt])
@@ -666,10 +679,10 @@ model AnalyticsEvent {
 // ───────────────────────── Intégrations, API, IA ─────────────────────────
 
 model Integration {
-  id                String    @id @default(cuid())
+  id                String      @id @default(cuid())
   workspaceId       String
   provider          String // google_analytics | meta_ads | google_ads | tiktok_ads | email
-  status            String    @default("disconnected") // disconnected | connected | error | expired
+  status            String      @default("disconnected") // disconnected | connected | error | expired
   accountName       String?
   externalAccountId String?
   credentials       String? // JSON chiffré (AES-256-GCM) — jamais renvoyé au navigateur
@@ -678,9 +691,9 @@ model Integration {
   expiresAt         DateTime?
   lastSyncAt        DateTime?
   lastError         String?
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
-  workspace         Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  workspace         Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   adAccounts        AdAccount[]
 
   @@unique([workspaceId, provider])
@@ -802,4 +815,189 @@ model EmailLog {
   lead              Lead?     @relation(fields: [leadId], references: [id], onDelete: SetNull)
 
   @@index([workspaceId, createdAt])
+}
+
+// ───────────────────────── Portefeuille multi-produits (SEA Pilot = moteur interne de croissance) ─────────────────────────
+// Un produit = un SaaS du portefeuille. Les champs « à confirmer » listent ce qui n'est pas vérifié : rien n'est inventé.
+model Product {
+  id               String    @id @default(cuid())
+  workspaceId      String
+  slug             String
+  name             String
+  tagline          String?
+  description      String?
+  valueProposition String?
+  targetCustomers  String?
+  problemsSolved   Json? // string[]
+  features         Json? // { text, verified }[]
+  pricing          Json? // { plans: { name, amount, currency, interval, verified }[], note }
+  publicUrl        String?
+  signupUrl        String?
+  demoUrl          String?
+  salesArguments   Json? // { text, approved }[]
+  objections       Json? // { objection, answer, approved }[]
+  channels         Json? // string[] : canaux de prospection pertinents
+  qualification    Json? // critères de qualification
+  objectives       Json? // { prospectsPerMonth, demosPerMonth, paidPerMonth }
+  unconfirmed      Json? // string[] : champs à confirmer
+  status           String    @default("preparation") // preparation | validation | commercialisation | suspended
+  deletedAt        DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  workspace        Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, slug])
+  @@index([workspaceId, status])
+}
+
+// Prospect SORTANT (identifié par vous), distinct du Lead ENTRANT : n'entre ni dans le CPL ni dans les quotas de leads.
+model Prospect {
+  id              String            @id @default(cuid())
+  workspaceId     String
+  productId       String? // produit auquel le prospect est attribué (verrou : un seul produit contacte la personne)
+  name            String
+  company         String?
+  jobTitle        String?
+  email           String?
+  phone           String?
+  websiteDomain   String?
+  dedupeKey       String // e-mail normalisé, sinon téléphone, sinon société+nom
+  audienceType    String            @default("b2b") // b2b | b2c
+  segment         String?
+  source          String // provenance (obligatoire)
+  sourceUrl       String?
+  collectedAt     DateTime // date de collecte (obligatoire)
+  legalBasis      String            @default("unknown") // consent_express | implied_published | implied_relationship | none | unknown
+  legalBasisNote  String?
+  status          String            @default("identified") // identified | contacted | replied | demo | trial | customer | lost | do_not_contact
+  nextFollowUpAt  DateTime?
+  lastContactedAt DateTime?
+  contactCount    Int               @default(0)
+  optedOutAt      DateTime?
+  campaignId      String? // campagne de prospection active (une seule à la fois)
+  notes           String?
+  importBatch     String?
+  createdById     String?
+  deletedAt       DateTime?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  workspace       Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  interests       ProspectProduct[]
+  contacts        ProspectContact[]
+  events          ProductEvent[]
+
+  @@unique([workspaceId, dedupeKey])
+  @@index([workspaceId, productId, status])
+  @@index([workspaceId, nextFollowUpAt])
+}
+
+// Produits supplémentaires pour lesquels un prospect déjà attribué correspond aussi (jamais contacté pour eux sans réattribution explicite).
+model ProspectProduct {
+  id          String    @id @default(cuid())
+  workspaceId String
+  prospectId  String
+  productId   String
+  note        String?
+  createdAt   DateTime  @default(now())
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  prospect    Prospect  @relation(fields: [prospectId], references: [id], onDelete: Cascade)
+
+  @@unique([prospectId, productId])
+}
+
+// Journal des contacts consignés par un humain : SEA Pilot n'envoie rien de lui-même.
+model ProspectContact {
+  id          String    @id @default(cuid())
+  workspaceId String
+  prospectId  String
+  productId   String?
+  channel     String // email | linkedin | phone | social | in_person
+  direction   String    @default("outbound") // outbound | inbound
+  templateId  String?
+  subject     String?
+  summary     String?
+  outcome     String? // no_reply | replied | interested | not_interested | demo_booked | opted_out
+  actorId     String?
+  createdAt   DateTime  @default(now())
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  prospect    Prospect  @relation(fields: [prospectId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, prospectId, createdAt])
+}
+
+model MessageTemplate {
+  id           String    @id @default(cuid())
+  workspaceId  String
+  productId    String
+  name         String
+  channel      String // email | linkedin | phone | social
+  subject      String?
+  body         String
+  status       String    @default("draft") // draft | approved | archived
+  createdById  String?
+  approvedById String?
+  approvedAt   DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, productId, status])
+}
+
+// Réglages par canal : DÉSACTIVÉ par défaut (l'absence de ligne = désactivé).
+model OutreachChannel {
+  id                     String    @id @default(cuid())
+  workspaceId            String
+  channel                String // email | linkedin | phone | social
+  enabled                Boolean   @default(false)
+  minDaysBetweenContacts Int       @default(7)
+  maxContactsPerProspect Int       @default(3)
+  updatedById            String?
+  updatedAt              DateTime  @updatedAt
+  workspace              Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, channel])
+}
+
+// Campagne de prospection : brouillon → approbation humaine → active. Jamais d'envoi automatique.
+model OutreachCampaign {
+  id            String    @id @default(cuid())
+  workspaceId   String
+  productId     String
+  name          String
+  channel       String
+  templateId    String?
+  segment       String?
+  status        String    @default("draft") // draft | pending_approval | active | paused | completed
+  requestedById String?
+  approvedById  String?
+  approvedAt    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  workspace     Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, productId, status])
+}
+
+// Conversions saisies à la main (webhook possible plus tard : même table, source = "webhook").
+model ProductEvent {
+  id           String    @id @default(cuid())
+  workspaceId  String
+  productId    String
+  prospectId   String?
+  type         String // signup | trial_started | demo | payment_confirmed | cancellation
+  occurredAt   DateTime
+  amount       Float?
+  currency     String?
+  source       String    @default("manual") // manual | webhook
+  externalRef  String? // référence externe (facture, identifiant d'événement)
+  dedupeKey    String // empêche la double comptabilisation
+  note         String?
+  recordedById String?
+  createdAt    DateTime  @default(now())
+  workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  prospect     Prospect? @relation(fields: [prospectId], references: [id], onDelete: SetNull)
+
+  @@unique([workspaceId, dedupeKey])
+  @@index([workspaceId, productId, type, occurredAt])
 }

@@ -18,11 +18,15 @@ const ICONS: Record<string, string> = {
   automations: "M13 2L3 14h7l-1 8 10-12h-7l1-8z",
   integrations: "M16 7V3h-2v4h-4V3H8v4H6v6l3 3v5h6v-5l3-3V7h-2z",
   settings: "M19.4 13a7.5 7.5 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 0 0-1.7-1L15 3h-4l-.4 2.9a7.4 7.4 0 0 0-1.7 1l-2.5-1-2 3.5L6.6 11a7.5 7.5 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1c.5.4 1.1.7 1.7 1L11 21h4l.4-2.9c.6-.3 1.2-.6 1.7-1l2.5 1 2-3.5-2.2-1.6zM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z",
+  portfolio: "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z",
+  prospects: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm0 2c-3 0-8 1.5-8 4.5V21h16v-2.5c0-3-5-4.5-8-4.5z",
   billing: "M20 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zm0 14H4v-6h16v6zm0-10H4V6h16v2z",
 };
 
 export const NAV: { href: string; label: string; icon: keyof typeof ICONS }[] = [
   { href: "/dashboard", label: "Dashboard", icon: "dashboard" },
+  { href: "/portfolio", label: "Portefeuille", icon: "portfolio" },
+  { href: "/prospects", label: "Prospects", icon: "prospects" },
   { href: "/research", label: "Research", icon: "research" },
   { href: "/offers", label: "Offers", icon: "offers" },
   { href: "/campaigns", label: "Campaigns", icon: "campaigns" },

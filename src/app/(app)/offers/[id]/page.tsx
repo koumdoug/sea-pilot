@@ -20,6 +20,7 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
   const offer = await db.offer.findFirst({ where: { id, workspaceId: ctx.workspaceId } });
   if (!offer) notFound();
   const audiences = await db.audience.findMany({ where: { workspaceId: ctx.workspaceId }, orderBy: { name: "asc" } });
+  const products = await db.product.findMany({ where: { workspaceId: ctx.workspaceId, deletedAt: null }, orderBy: { name: "asc" }, select: { id: true, name: true } });
   const variants = (Array.isArray(offer.variants) ? offer.variants : []) as unknown as Variant[];
   const ai = providerStatus();
   const facts = offerFactsOf(offer);
@@ -28,7 +29,7 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
     <>
       <PageHeader title={offer.name} subtitle={<Link href="/offers" className="underline">← Toutes les offres</Link>}
         actions={ctx.can("delete") ? <InlineAction action={deleteOfferAction} variant="danger" hidden={{ id: offer.id }} confirm="Supprimer cette offre ?">Supprimer</InlineAction> : undefined} />
-      <Section title="Détails de l'offre">{ctx.can("write") ? <OfferForm offer={offer} audiences={audiences} currency={ctx.workspace.currency} /> : <p className="text-sm">{offer.description}</p>}</Section>
+      <Section title="Détails de l'offre">{ctx.can("write") ? <OfferForm offer={offer} audiences={audiences} currency={ctx.workspace.currency} products={products} /> : <p className="text-sm">{offer.description}</p>}</Section>
 
       <Section title="Offer Builder (IA)" description="Générez plusieurs variantes de proposition de valeur, titres, bénéfices, objections, garanties suggérées, bundles et upsells."
         actions={<Badge tone="purple">Généré par IA</Badge>}>

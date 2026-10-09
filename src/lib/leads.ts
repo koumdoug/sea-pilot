@@ -22,6 +22,7 @@ export type NewLeadInput = {
   medium?: string | null;
   utm?: { source?: string | null; medium?: string | null; campaign?: string | null; term?: string | null; content?: string | null };
   campaignId?: string | null;
+  productId?: string | null; // SaaS du portefeuille ; à défaut, déduit de la campagne puis de la landing page
   landingPageId?: string | null;
   formId?: string | null;
   referrer?: string | null;
@@ -56,6 +57,23 @@ export async function resolveCampaignId(workspaceId: string, p: { campaignId?: s
   return null;
 }
 
+/** Produit d'un lead entrant : explicite (vérifié dans l'espace) → campagne → landing page. Null si rien n'est attribué. */
+export async function resolveProductId(workspaceId: string, p: { productId?: string | null; campaignId?: string | null; landingPageId?: string | null }): Promise<string | null> {
+  if (p.productId) {
+    const x = await db.product.findFirst({ where: { id: p.productId, workspaceId, deletedAt: null }, select: { id: true } });
+    if (x) return x.id;
+  }
+  if (p.campaignId) {
+    const c = await db.campaign.findFirst({ where: { id: p.campaignId, workspaceId }, select: { productId: true } });
+    if (c?.productId) return c.productId;
+  }
+  if (p.landingPageId) {
+    const lp = await db.landingPage.findFirst({ where: { id: p.landingPageId, workspaceId }, select: { productId: true } });
+    if (lp?.productId) return lp.productId;
+  }
+  return null;
+}
+
 export async function createLead(i: NewLeadInput): Promise<{ lead: Lead; duplicate: boolean }> {
   const email = i.email ? i.email.trim().toLowerCase() : null;
 
@@ -68,6 +86,7 @@ export async function createLead(i: NewLeadInput): Promise<{ lead: Lead; duplica
   }
 
   const campaignId = await resolveCampaignId(i.workspaceId, { campaignId: i.campaignId, landingPageId: i.landingPageId, utmCampaign: i.utm?.campaign });
+  const productId = await resolveProductId(i.workspaceId, { productId: i.productId, campaignId, landingPageId: i.landingPageId });
   const consent = !!i.consentMarketing && !!email;
   const lead = await db.lead.create({
     data: {
@@ -77,7 +96,7 @@ export async function createLead(i: NewLeadInput): Promise<{ lead: Lead; duplica
       customFields: (i.customFields ?? undefined) as Prisma.InputJsonValue | undefined,
       source: clean(i.source ?? i.utm?.source, 120), medium: clean(i.medium ?? i.utm?.medium, 120),
       utmSource: clean(i.utm?.source, 120), utmMedium: clean(i.utm?.medium, 120), utmCampaign: clean(i.utm?.campaign, 200), utmTerm: clean(i.utm?.term, 200), utmContent: clean(i.utm?.content, 200),
-      campaignId, landingPageId: i.landingPageId ?? null, formId: i.formId ?? null,
+      campaignId, productId, landingPageId: i.landingPageId ?? null, formId: i.formId ?? null,
       referrer: clean(i.referrer, 500), landingUrl: clean(i.landingUrl, 500),
       consentMarketing: consent, consentAt: consent ? new Date() : null, consentText: consent ? clean(i.consentText, 1000) : null,
       ipHash: i.ipHash ?? null, value: i.value ?? null,

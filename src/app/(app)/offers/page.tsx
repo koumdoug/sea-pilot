@@ -15,9 +15,10 @@ const LABEL: Record<string, string> = { draft: "Brouillon", active: "Active", ar
 export default async function OffersPage({ searchParams }: { searchParams: Promise<{ new?: string }> }) {
   const ctx = await requireCtx();
   const sp = await searchParams;
-  const [offers, audiences] = await Promise.all([
+  const [offers, audiences, products] = await Promise.all([
     db.offer.findMany({ where: { workspaceId: ctx.workspaceId }, orderBy: { createdAt: "desc" }, include: { audience: true } }),
     db.audience.findMany({ where: { workspaceId: ctx.workspaceId }, orderBy: { name: "asc" } }),
+    db.product.findMany({ where: { workspaceId: ctx.workspaceId, deletedAt: null }, orderBy: { name: "asc" }, select: { id: true, name: true } }),
   ]);
   const canWrite = ctx.can("write");
 
@@ -44,7 +45,7 @@ export default async function OffersPage({ searchParams }: { searchParams: Promi
         </ul>
       )}
 
-      {canWrite && sp.new && <div id="nouvelle" className="mt-5"><Section title="Nouvelle offre"><OfferForm audiences={audiences} currency={ctx.workspace.currency} /></Section></div>}
+      {canWrite && sp.new && <div id="nouvelle" className="mt-5"><Section title="Nouvelle offre"><OfferForm audiences={audiences} currency={ctx.workspace.currency} products={products} /></Section></div>}
 
       <div className="mt-8">
         <Section title="Audiences" description="Vos clients idéaux. Une audience peut être associée à plusieurs offres et campagnes.">

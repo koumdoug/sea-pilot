@@ -6,6 +6,8 @@ export type Action =
   | "delete" // supprimer / archiver définitivement
   | "ai" // utiliser l'IA (coûts)
   | "manage_integrations"
+  | "manage_products" // catalogue des SaaS du portefeuille, canaux de prospection
+  | "approve_outreach" // approuver modèles de messages et campagnes de prospection
   | "manage_members"
   | "manage_billing"
   | "manage_settings"
@@ -14,8 +16,8 @@ export type Action =
 const MATRIX: Record<Role, Action[]> = {
   viewer: ["read"],
   member: ["read", "write", "ai"],
-  admin: ["read", "write", "delete", "ai", "manage_integrations", "manage_members", "manage_settings"],
-  owner: ["read", "write", "delete", "ai", "manage_integrations", "manage_members", "manage_settings", "manage_billing", "delete_workspace"],
+  admin: ["read", "write", "delete", "ai", "manage_integrations", "manage_products", "approve_outreach", "manage_members", "manage_settings"],
+  owner: ["read", "write", "delete", "ai", "manage_integrations", "manage_products", "approve_outreach", "manage_members", "manage_settings", "manage_billing", "delete_workspace"],
 };
 
 export function can(role: string | null | undefined, action: Action): boolean {

@@ -23,7 +23,7 @@ export async function createCampaignAction(_: ActionState, fd: FormData): Promis
       db.offer.findFirst({ where: { workspaceId: ctx.workspaceId, status: "active" }, orderBy: { createdAt: "asc" } }),
       db.audience.findFirst({ where: { workspaceId: ctx.workspaceId }, orderBy: { createdAt: "asc" } }),
     ]);
-    const c = await db.campaign.create({ data: { workspaceId: ctx.workspaceId, name: d.name, objective: d.objective, offerId: offer?.id, audienceId: audience?.id, budget: ctx.workspace.adBudgetMonthly ?? undefined, builderStep: 2 } });
+    const c = await db.campaign.create({ data: { workspaceId: ctx.workspaceId, name: d.name, objective: d.objective, offerId: offer?.id, productId: offer?.productId ?? null, audienceId: audience?.id, budget: ctx.workspace.adBudgetMonthly ?? undefined, builderStep: 2 } });
     await audit({ workspaceId: ctx.workspaceId, userId: ctx.user.id, action: "campaign.created", entity: "Campaign", entityId: c.id });
     id = c.id;
   });
@@ -66,6 +66,7 @@ export async function saveCampaignStepAction(_: ActionState, fd: FormData): Prom
       if (step === 7 && d.landingPageId && !(await db.landingPage.findFirst({ where: { id: String(d.landingPageId), workspaceId: ctx.workspaceId }, select: { id: true } }))) throw new UserError("Landing page introuvable.");
       if (step === 6 && d.startDate && d.endDate && (d.endDate as Date) < (d.startDate as Date)) throw new UserError("La date de fin précède la date de début.");
       Object.assign(data, d);
+      if (step === 3) data.productId = (await db.offer.findFirst({ where: { id: String(d.offerId), workspaceId: ctx.workspaceId }, select: { productId: true } }))?.productId ?? null;
       if (step === 7) data.landingPageId = (d.landingPageId as string) || null;
     }
     data.builderStep = Math.max(c.builderStep, Math.min(10, step + 1));

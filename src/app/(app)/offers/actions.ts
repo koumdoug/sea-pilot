@@ -29,6 +29,7 @@ const offerSchemaIn = z.object({
   advantages: z.string().trim().max(2000).optional(),
   differentiation: optStr(800),
   audienceId: optStr(60),
+  productId: optStr(60),
 });
 
 export async function saveOfferAction(_: ActionState, fd: FormData): Promise<ActionState> {
@@ -36,8 +37,9 @@ export async function saveOfferAction(_: ActionState, fd: FormData): Promise<Act
   const r = await run({ action: "write" }, async (ctx) => {
     const d = parse(offerSchemaIn, formObject(fd));
     if (d.audienceId && !(await db.audience.findFirst({ where: { id: d.audienceId, workspaceId: ctx.workspaceId }, select: { id: true } }))) throw new UserError("Audience introuvable.");
+    if (d.productId && !(await db.product.findFirst({ where: { id: d.productId, workspaceId: ctx.workspaceId, deletedAt: null }, select: { id: true } }))) throw new UserError("Produit introuvable.");
     const data = {
-      name: d.name, description: d.description ?? null, problem: d.problem ?? null, price: d.price ?? null, marginPct: d.marginPct ?? null, currency: d.currency, geoZone: d.geoZone ?? null,
+      name: d.name, productId: d.productId ?? null, description: d.description ?? null, problem: d.problem ?? null, price: d.price ?? null, marginPct: d.marginPct ?? null, currency: d.currency, geoZone: d.geoZone ?? null,
       advantages: (d.advantages ?? "").split(/\r?\n|;/).map((s) => s.trim()).filter(Boolean).slice(0, 12), differentiation: d.differentiation ?? null, audienceId: d.audienceId ?? null,
     };
     if (d.id) {

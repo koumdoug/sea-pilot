@@ -3,7 +3,7 @@ import { ActionForm, SelectField, SubmitButton, TextAreaField, TextField } from 
 import { CURRENCIES } from "@/lib/constants";
 import { saveOfferAction } from "./actions";
 
-export function OfferForm({ offer, audiences, currency }: { offer?: Offer | null; audiences: Audience[]; currency: string }) {
+export function OfferForm({ offer, audiences, currency, products = [] }: { offer?: Offer | null; audiences: Audience[]; currency: string; products?: { id: string; name: string }[] }) {
   const adv = Array.isArray(offer?.advantages) ? (offer!.advantages as string[]).join("\n") : "";
   return (
     <ActionForm action={saveOfferAction}>
@@ -20,6 +20,7 @@ export function OfferForm({ offer, audiences, currency }: { offer?: Offer | null
       <TextAreaField name="advantages" label="Avantages (un par ligne)" rows={3} defaultValue={adv} />
       <TextAreaField name="differentiation" label="Différenciation" rows={2} defaultValue={offer?.differentiation} />
       <SelectField name="audienceId" label="Audience cible" defaultValue={offer?.audienceId} options={audiences.map((a) => [a.id, `${a.name} (${a.type.toUpperCase()})`] as const)} placeholder="— aucune —" />
+      {products.length > 0 && <SelectField name="productId" label="Produit du portefeuille" defaultValue={offer?.productId} options={products.map((p) => [p.id, p.name] as const)} placeholder="— non attribuée —" help="Les campagnes qui utilisent cette offre sont rattachées à ce produit." />}
       <SubmitButton>{offer ? "Enregistrer" : "Créer l'offre"}</SubmitButton>
     </ActionForm>
   );

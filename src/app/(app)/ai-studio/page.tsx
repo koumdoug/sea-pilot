@@ -5,7 +5,7 @@ import { db } from "@/lib/db";
 import { requireCtx } from "@/lib/tenant";
 import { providerStatus } from "@/lib/ai/providers";
 import { AD_PLATFORMS, PLATFORM_LABEL } from "@/lib/constants";
-import { Badge, ConfigRequired, EmptyState, PageHeader, Section, fmtDate } from "@/components/ui";
+import { Alert, Badge, ConfigRequired, EmptyState, PageHeader, Section, fmtDate } from "@/components/ui";
 import { ActionForm, InlineAction, SelectField, SubmitButton, TextAreaField, TextField } from "@/components/forms";
 import { CopyButton } from "@/components/copy-button";
 import { deleteAdAction, duplicateAdAction, generateAdsAction, toggleWinnerAction, updateAdAction } from "./actions";
@@ -35,17 +35,24 @@ export default async function AiStudioPage({ searchParams }: { searchParams: Pro
       {!ai.configured ? <div className="mb-5"><ConfigRequired env={["OPENAI_API_KEY + OPENAI_MODEL", "ANTHROPIC_API_KEY", "GEMINI_API_KEY + GEMINI_MODEL"]}>Aucun fournisseur d'IA n'est configuré : la génération est indisponible. {ai.problem} Vous pouvez néanmoins créer et gérer vos annonces existantes ci-dessous.</ConfigRequired></div>
         : ctx.can("ai") && (
           <Section title="Générer des annonces" actions={<Badge tone="purple">{ai.provider} · {ai.model}</Badge>}>
-            <ActionForm action={generateAdsAction}>
-              <div className="grid gap-4 md:grid-cols-3">
-                <SelectField name="platform" label="Plateforme" required defaultValue="meta_ads" options={AD_PLATFORMS.map((p) => [p, PLATFORM_LABEL[p]] as const)} />
-                <SelectField name="campaignId" label="Campagne (optionnel)" defaultValue={sp.campaignId} options={campaigns.map((c) => [c.id, c.name] as const)} placeholder="— aucune —" />
-                <SelectField name="offerId" label="Offre" defaultValue={selectedCampaign?.offerId} options={offers.map((o) => [o.id, o.name] as const)} placeholder="— celle de la campagne —" />
-                <SelectField name="audienceId" label="Audience" options={audiences.map((a) => [a.id, a.name] as const)} placeholder="— celle de la campagne —" />
-                <TextField name="tone" label="Ton souhaité" placeholder="Ex. chaleureux, direct, expert" />
-                <SelectField name="count" label="Nombre de variantes (A/B)" required defaultValue="3" options={["1", "2", "3", "4", "5", "6", "8"]} />
-              </div>
-              <SubmitButton pendingLabel="Génération en cours…">Générer</SubmitButton>
-            </ActionForm>
+            {offers.length === 0 ? (
+              <Alert tone="warning" title="Créez d'abord une offre">
+                Les annonces sont générées à partir d'une offre (produit, prix, avantages). Vous n'en avez aucune active pour le moment (ou toutes sont archivées).{" "}
+                <Link href="/offers?new=1#nouvelle" className="font-semibold underline">Créer une offre</Link>, puis revenez ici.
+              </Alert>
+            ) : (
+              <ActionForm action={generateAdsAction}>
+                <div className="grid gap-4 md:grid-cols-3">
+                  <SelectField name="platform" label="Plateforme" required defaultValue="meta_ads" options={AD_PLATFORMS.map((p) => [p, PLATFORM_LABEL[p]] as const)} />
+                  <SelectField name="campaignId" label="Campagne (optionnel)" defaultValue={sp.campaignId} options={campaigns.map((c) => [c.id, c.name] as const)} placeholder="— aucune —" />
+                  <SelectField name="offerId" label="Offre à promouvoir" required defaultValue={selectedCampaign?.offerId ?? offers[0]?.id} options={offers.map((o) => [o.id, o.name] as const)} help={<>Gérez vos offres dans <Link href="/offers" className="underline">Offers</Link>.</>} />
+                  <SelectField name="audienceId" label="Audience (optionnel)" options={audiences.map((a) => [a.id, a.name] as const)} placeholder="— celle de la campagne, sinon aucune —" />
+                  <TextField name="tone" label="Ton souhaité" placeholder="Ex. chaleureux, direct, expert" />
+                  <SelectField name="count" label="Nombre de variantes (A/B)" required defaultValue="3" options={["1", "2", "3", "4", "5", "6", "8"]} />
+                </div>
+                <SubmitButton pendingLabel="Génération en cours…">Générer</SubmitButton>
+              </ActionForm>
+            )}
           </Section>
         )}
 

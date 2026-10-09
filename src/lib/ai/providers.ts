@@ -93,7 +93,25 @@ export function setAIProviderForTests(p: AIProvider | null) {
   override = p;
 }
 
-export type ProviderStatus = { configured: boolean; provider: string | null; model: string | null; available: { id: string; configured: boolean; hint: string }[] };
+export type ProviderStatus = {
+  configured: boolean; provider: string | null; model: string | null;
+  available: { id: string; configured: boolean; hint: string }[];
+  /** Raison précise (sans aucune valeur secrète) lorsqu'aucun fournisseur n'est utilisable. */
+  problem: string | null;
+};
+
+const PROVIDER_IDS = ["openai", "anthropic", "gemini"];
+
+function problemOf(configured: boolean, available: ProviderStatus["available"]): string | null {
+  if (configured) return null;
+  const forced = env.aiProvider;
+  if (forced && !PROVIDER_IDS.includes(forced)) return `AI_PROVIDER est défini à « ${forced} » : valeurs acceptées : ${PROVIDER_IDS.join(", ")} (ou variable absente).`;
+  if (forced) {
+    const a = available.find((x) => x.id === forced);
+    return `AI_PROVIDER = ${forced}, mais ses variables sont absentes ou vides côté serveur : ${a?.hint}.`;
+  }
+  return "Aucune des variables d'un fournisseur n'est définie (ou elles sont vides) dans l'environnement du serveur.";
+}
 
 function candidates(): AIProvider[] {
   const list: AIProvider[] = [];
@@ -112,12 +130,10 @@ export function getProvider(): AIProvider | null {
 
 export function providerStatus(): ProviderStatus {
   const p = getProvider();
-  return {
-    configured: !!p, provider: p?.id ?? null, model: p?.model ?? null,
-    available: [
-      { id: "openai", configured: !!(env.openaiKey && env.openaiModel), hint: "OPENAI_API_KEY + OPENAI_MODEL" },
-      { id: "anthropic", configured: !!env.anthropicKey, hint: "ANTHROPIC_API_KEY (ANTHROPIC_MODEL optionnel)" },
-      { id: "gemini", configured: !!(env.geminiKey && env.geminiModel), hint: "GEMINI_API_KEY + GEMINI_MODEL" },
-    ],
-  };
+  const available = [
+    { id: "openai", configured: !!(env.openaiKey && env.openaiModel), hint: "OPENAI_API_KEY + OPENAI_MODEL" },
+    { id: "anthropic", configured: !!env.anthropicKey, hint: "ANTHROPIC_API_KEY (ANTHROPIC_MODEL optionnel)" },
+    { id: "gemini", configured: !!(env.geminiKey && env.geminiModel), hint: "GEMINI_API_KEY + GEMINI_MODEL" },
+  ];
+  return { configured: !!p, provider: p?.id ?? null, model: p?.model ?? null, available, problem: problemOf(!!p, available) };
 }

@@ -1,7 +1,9 @@
 // Lecture centralisée des variables d'environnement. Aucune clé secrète n'est jamais exposée au navigateur.
+// Valeur nettoyée : espaces retirés, et guillemets englobants retirés (erreur de saisie fréquente dans les consoles d'hébergement : "valeur").
 const opt = (k: string) => {
-  const v = process.env[k];
-  return v && v.trim() ? v.trim() : undefined;
+  let v = process.env[k]?.trim();
+  if (v && v.length >= 2 && ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'")))) v = v.slice(1, -1).trim();
+  return v ? v : undefined;
 };
 const int = (k: string, d: number) => {
   const n = Number(process.env[k]);

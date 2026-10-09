@@ -32,7 +32,7 @@ export default async function AiStudioPage({ searchParams }: { searchParams: Pro
   return (
     <>
       <PageHeader title="AI Studio" subtitle="Générez des annonces pour Facebook/Instagram, Google, TikTok et LinkedIn. Chaque génération est enregistrée ; vous pouvez copier, modifier, dupliquer et marquer la gagnante." />
-      {!ai.configured ? <div className="mb-5"><ConfigRequired env={["OPENAI_API_KEY + OPENAI_MODEL", "ANTHROPIC_API_KEY", "GEMINI_API_KEY + GEMINI_MODEL"]}>Aucun fournisseur d'IA n'est configuré : la génération est indisponible. Vous pouvez néanmoins créer et gérer vos annonces existantes ci-dessous.</ConfigRequired></div>
+      {!ai.configured ? <div className="mb-5"><ConfigRequired env={["OPENAI_API_KEY + OPENAI_MODEL", "ANTHROPIC_API_KEY", "GEMINI_API_KEY + GEMINI_MODEL"]}>Aucun fournisseur d'IA n'est configuré : la génération est indisponible. {ai.problem} Vous pouvez néanmoins créer et gérer vos annonces existantes ci-dessous.</ConfigRequired></div>
         : ctx.can("ai") && (
           <Section title="Générer des annonces" actions={<Badge tone="purple">{ai.provider} · {ai.model}</Badge>}>
             <ActionForm action={generateAdsAction}>

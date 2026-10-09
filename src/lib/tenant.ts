@@ -5,7 +5,8 @@ import { db } from "./db";
 import { requireUser, type SessionUser } from "./auth";
 import { WORKSPACE_COOKIE } from "./constants";
 import { assertCan, can, type Action } from "./permissions";
-import { entitlement, type Entitlement } from "./plans";
+import { entitlement, exemptEntitlement, type Entitlement } from "./plans";
+import { isFreeOwner } from "./free-access";
 
 export type Ctx = {
   user: SessionUser;
@@ -40,7 +41,7 @@ export async function getCtx(): Promise<Ctx | null> {
 }
 
 export function buildCtx(user: SessionUser, workspace: Workspace, role: string, subscription: Subscription | null): Ctx {
-  return { user, workspace, workspaceId: workspace.id, role, subscription, ent: entitlement(subscription), can: (a) => can(role, a) };
+  return { user, workspace, workspaceId: workspace.id, role, subscription, ent: isFreeOwner(user.id, role) ? exemptEntitlement() : entitlement(subscription), can: (a) => can(role, a) };
 }
 
 type RequireOpts = { action?: Action; allowInactive?: boolean; allowIncompleteOnboarding?: boolean };

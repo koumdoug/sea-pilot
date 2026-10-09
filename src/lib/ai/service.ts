@@ -5,7 +5,8 @@ import { log, errMsg } from "../logger";
 import { rateLimit } from "../rate-limit";
 import { AIError } from "./errors";
 import { getProvider } from "./providers";
-import { entitlement, limitOf } from "../plans";
+import { limitOf } from "../plans";
+import { entitlementForWorkspace } from "../free-access";
 
 export type GenerateParams<S extends z.ZodType> = {
   workspaceId: string;
@@ -47,7 +48,7 @@ export async function generate<S extends z.ZodType>(p: GenerateParams<S>): Promi
   const sub = await db.subscription.findUnique({ where: { workspaceId: p.workspaceId } });
   const dayStart = new Date(); dayStart.setUTCHours(0, 0, 0, 0);
   const used = await db.aIGeneration.count({ where: { workspaceId: p.workspaceId, createdAt: { gte: dayStart } } });
-  const cap = Math.min(env.aiDailyLimitPerWorkspace, limitOf(entitlement(sub).plan, "aiGenerationsPerDay"));
+  const cap = Math.min(env.aiDailyLimitPerWorkspace, limitOf((await entitlementForWorkspace(p.workspaceId, sub)).plan, "aiGenerationsPerDay"));
   if (used >= cap) throw new AIError("quota", "quota");
 
   const temperature = p.temperature ?? 0.7;

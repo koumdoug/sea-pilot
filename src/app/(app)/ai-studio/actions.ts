@@ -27,7 +27,7 @@ export async function generateAdsAction(_: ActionState, fd: FormData): Promise<A
       workspaceId: ctx.workspaceId, userId: ctx.user.id, campaignId: campaign?.id, kind: "ad_copy", temperature: 0.85,
       system: baseSystem(briefOf(ctx.workspace), "rédacteur publicitaire spécialisé en annonces à la performance"),
       prompt: adCopyPrompt({
-        platform: d.platform, objective: d.objective ?? campaign?.objective, tone: d.tone, count: d.count,
+        platform: d.platform, objective: d.objective ?? campaign?.objective, tone: d.tone, count: d.count, offerPrice: off.price, currency: off.currency,
         offer: { name: off.name, description: off.description, price: off.price, advantages: off.advantages, differentiation: off.differentiation, problem: off.problem },
         audience: aud ? { name: aud.name, type: aud.type, needs: aud.needs, problems: aud.problems, objections: aud.objections } : undefined,
       }),
@@ -61,7 +61,7 @@ export async function duplicateAdAction(_: ActionState, fd: FormData): Promise<A
     const { id } = parse(z.object({ id: z.string() }), formObject(fd));
     const a = await db.ad.findFirst({ where: { id, workspaceId: ctx.workspaceId } });
     if (!a) throw new UserError("Annonce introuvable.");
-    await db.ad.create({ data: { workspaceId: ctx.workspaceId, campaignId: a.campaignId, platform: a.platform, format: a.format, variantLabel: `${a.variantLabel ?? ""}'`, hook: a.hook, headline: a.headline, primaryText: a.primaryText, description: a.description, cta: a.cta, status: "draft", source: "user" } });
+    await db.ad.create({ data: { workspaceId: ctx.workspaceId, campaignId: a.campaignId, platform: a.platform, format: a.format, variantLabel: `${a.variantLabel ?? ""}'`, hook: a.hook, headline: a.headline, primaryText: a.primaryText, description: a.description, cta: a.cta, status: "draft", source: a.source, generationId: a.generationId } });
     revalidatePath("/ai-studio");
   });
 }

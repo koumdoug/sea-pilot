@@ -23,6 +23,8 @@ export const env = {
     return s;
   },
   get encryptionKey() { return opt("ENCRYPTION_KEY") ?? this.sessionSecret; },
+  /** Identifiants d'utilisateurs (cuid) dont l'espace dont ils sont propriétaires est exempté de facturation. Vide = aucune exception. */
+  get freeAccessUserIds(): string[] { return (opt("FREE_ACCESS_USER_IDS") ?? "").split(",").map((x) => x.trim()).filter(Boolean); },
   get cronSecret() { return opt("CRON_SECRET"); },
   get trialDays() { return int("TRIAL_DAYS", 14); },
   // IA

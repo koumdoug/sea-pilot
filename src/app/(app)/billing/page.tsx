@@ -10,7 +10,7 @@ import { cancelAction, changePlanAction, checkoutAction, portalAction, selectTri
 
 export const metadata: Metadata = { title: "Billing" };
 const LIMIT_LABEL: Record<keyof PlanLimits, string> = { members: "Utilisateurs", activeCampaigns: "Campagnes actives", landingPages: "Landing pages", leadsPerMonth: "Leads ce mois-ci", aiGenerationsPerDay: "Générations IA / jour", sequences: "Séquences de relance", integrations: "Intégrations", apiKeys: "Clés API" };
-const STATE_LABEL: Record<string, string> = { trial: "Essai gratuit", paid: "Abonnement actif", past_due: "Paiement en échec", canceling: "Résiliation programmée", trial_expired: "Essai terminé", canceled: "Abonnement terminé", incomplete: "Incomplet" };
+const STATE_LABEL: Record<string, string> = { exempt: "Accès propriétaire gratuit", trial: "Essai gratuit", paid: "Abonnement actif", past_due: "Paiement en échec", canceling: "Résiliation programmée", trial_expired: "Essai terminé", canceled: "Abonnement terminé", incomplete: "Incomplet" };
 
 export default async function BillingPage({ searchParams }: { searchParams: Promise<{ blocked?: string; success?: string; canceled?: string }> }) {
   const ctx = await requireCtx({ allowInactive: true });
@@ -32,6 +32,7 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
       <Card className="mb-5">
         <div className="flex flex-wrap items-center gap-3"><h2 className="text-lg font-semibold">Plan {e.plan.name}</h2><Badge tone={e.active ? (e.state === "past_due" ? "orange" : "green") : "red"}>{STATE_LABEL[e.state]}</Badge></div>
         <p className="mt-1 text-sm text-slate-700">
+          {e.state === "exempt" && "Cet espace est exempté de facturation (accès propriétaire défini côté serveur) : toutes les fonctions sont disponibles sans paiement."}
           {e.state === "trial" && `Essai gratuit : il reste ${e.daysLeft} jour(s) (jusqu'au ${fmtDate(sub?.trialEndsAt)}).`}
           {e.state === "paid" && `Prochain renouvellement : ${fmtDate(sub?.currentPeriodEnd)}.`}
           {e.state === "canceling" && `Abonnement résilié : accès jusqu'au ${fmtDate(sub?.currentPeriodEnd)}.`}

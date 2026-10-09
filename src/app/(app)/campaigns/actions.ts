@@ -86,7 +86,7 @@ export async function generateCampaignProposalAction(_: ActionState, fd: FormDat
       workspaceId: ctx.workspaceId, userId: ctx.user.id, campaignId: c.id, kind: "campaign", temperature: 0.7,
       system: baseSystem(briefOf(ctx.workspace), "stratège publicitaire"),
       prompt: campaignPrompt({
-        objective: c.objective, platform: c.platform, budget: c.budget,
+        objective: c.objective, platform: c.platform, budget: c.budget, offerPrice: c.offer.price, currency: c.offer.currency,
         audience: { name: c.audience.name, type: c.audience.type, location: c.audience.location, needs: c.audience.needs, problems: c.audience.problems, objections: c.audience.objections },
         offer: { name: c.offer.name, description: c.offer.description, price: c.offer.price, advantages: c.offer.advantages, differentiation: c.offer.differentiation },
       }),

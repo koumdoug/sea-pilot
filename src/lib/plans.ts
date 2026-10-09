@@ -56,7 +56,7 @@ export type SubscriptionLike = {
 export type Entitlement = {
   /** L'espace de travail peut utiliser le produit. */
   active: boolean;
-  state: "trial" | "paid" | "past_due" | "canceling" | "trial_expired" | "canceled" | "incomplete";
+  state: "exempt" | "trial" | "paid" | "past_due" | "canceling" | "trial_expired" | "canceled" | "incomplete";
   plan: Plan;
   daysLeft: number | null;
   reason?: string;
@@ -95,6 +95,11 @@ export function entitlement(sub: SubscriptionLike | null, now = new Date()): Ent
   }
   if (status === "canceled" || status === "expired") return { active: false, state: "canceled", plan, daysLeft: 0, reason: "Abonnement terminé. Réactivez un plan pour continuer." };
   return { active: false, state: "incomplete", plan, daysLeft: null, reason: "Abonnement incomplet." };
+}
+
+/** Accès gratuit du propriétaire de la plateforme (liste d'exceptions serveur) : toutes les fonctions, limites du plan le plus élevé. Aucun paiement requis. */
+export function exemptEntitlement(): Entitlement {
+  return { active: true, state: "exempt", plan: PLANS.pro, daysLeft: null };
 }
 
 export function limitOf(plan: Plan, key: keyof PlanLimits): number {

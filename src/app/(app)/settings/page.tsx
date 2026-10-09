@@ -33,6 +33,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
             <ActionForm action={updateProfileAction}>
               <TextField name="name" label="Nom" required defaultValue={ctx.user.name} />
               <TextField name="email" label="Adresse e-mail" type="email" defaultValue={ctx.user.email} readOnly help="L'adresse e-mail n'est pas modifiable depuis cette page." />
+              <TextField name="userId" label="Identifiant du compte" defaultValue={ctx.user.id} readOnly help="Identifiant technique, non secret. L'administrateur du serveur l'utilise dans FREE_ACCESS_USER_IDS pour exempter le propriétaire de la facturation." />
               <SelectField name="locale" label="Langue de l'interface" required defaultValue={ctx.user.locale} options={LANGUAGES} />
               <SubmitButton>Enregistrer</SubmitButton>
             </ActionForm>

@@ -2,7 +2,8 @@ import type { Campaign, Prisma } from "@prisma/client";
 import { db } from "./db";
 import { audit } from "./audit";
 import { CAMPAIGN_TRANSITIONS, type CampaignStatus, CAMPAIGN_STATUSES } from "./constants";
-import { entitlement, limitReached } from "./plans";
+import { limitReached } from "./plans";
+import { entitlementForWorkspace } from "./free-access";
 
 export class CampaignError extends Error {}
 
@@ -37,7 +38,7 @@ export async function transitionCampaign(p: { workspaceId: string; campaignId: s
   if (p.to === "active") {
     const sub = await db.subscription.findUnique({ where: { workspaceId: p.workspaceId } });
     const used = await db.campaign.count({ where: { workspaceId: p.workspaceId, status: "active", id: { not: c.id } } });
-    if (limitReached(entitlement(sub).plan, "activeCampaigns", used)) throw new CampaignError("Limite de campagnes actives atteinte pour votre plan.");
+    if (limitReached((await entitlementForWorkspace(p.workspaceId, sub)).plan, "activeCampaigns", used)) throw new CampaignError("Limite de campagnes actives atteinte pour votre plan.");
   }
   const u = await db.campaign.update({ where: { id: c.id }, data: { status: p.to } });
   await audit({ workspaceId: p.workspaceId, userId: p.actorId, action: "campaign.status_changed", entity: "Campaign", entityId: c.id, meta: { from: c.status, to: p.to } });

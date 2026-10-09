@@ -3,7 +3,7 @@ import { db } from "@/lib/db";
 import { sha256 } from "@/lib/crypto";
 import { createLead } from "@/lib/leads";
 import { rateLimit } from "@/lib/rate-limit";
-import { entitlement } from "@/lib/plans";
+import { entitlementForWorkspace } from "@/lib/free-access";
 import { audit } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
@@ -33,7 +33,7 @@ export async function POST(req: Request) {
   const key = await db.apiKey.findUnique({ where: { keyHash: sha256(token) }, include: { workspace: { include: { subscription: true } } } });
   if (!key || key.revokedAt || key.workspace.deletedAt) return json({ error: "Clé API manquante ou invalide." }, 401);
   if (!rateLimit(`apikey:${key.id}`, 60, 60_000).ok) return json({ error: "Limite de débit atteinte (60 requêtes/minute)." }, 429);
-  if (!entitlement(key.workspace.subscription).active) return json({ error: "Abonnement inactif." }, 402);
+  if (!(await entitlementForWorkspace(key.workspaceId, key.workspace.subscription)).active) return json({ error: "Abonnement inactif." }, 402);
 
   let b: z.infer<typeof body>;
   try { b = body.parse(JSON.parse((await req.text()).slice(0, 40_000))); } catch (e) { return json({ error: "Corps invalide.", details: e instanceof z.ZodError ? e.issues.map((i) => i.message) : undefined }, 400); }

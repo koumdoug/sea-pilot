@@ -88,7 +88,7 @@ export async function generateOfferVariantsAction(_: ActionState, fd: FormData):
     const r = await generate({
       workspaceId: ctx.workspaceId, userId: ctx.user.id, kind: "offer", temperature: 0.8,
       system: baseSystem(briefOf(ctx.workspace), "expert en conception d'offres commerciales"),
-      prompt: offerPrompt({ product: offer.name, target: offer.audience ? `${offer.audience.name} (${offer.audience.type})` : undefined, problem: offer.problem ?? undefined, price: offer.price, advantages: Array.isArray(offer.advantages) ? (offer.advantages as string[]) : [], differentiation: offer.differentiation ?? undefined, variants: count }),
+      prompt: offerPrompt({ product: offer.name, target: offer.audience ? `${offer.audience.name} (${offer.audience.type})` : undefined, problem: offer.problem ?? undefined, price: offer.price, currency: offer.currency, advantages: Array.isArray(offer.advantages) ? (offer.advantages as string[]) : [], differentiation: offer.differentiation ?? undefined, variants: count }),
       schema: offerSchema, input: { offerId: offer.id, count },
     });
     const existing = Array.isArray(offer.variants) ? (offer.variants as unknown[]) : [];

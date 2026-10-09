@@ -7,7 +7,9 @@ import { providerStatus } from "@/lib/ai/providers";
 import { AD_PLATFORMS, PLATFORM_LABEL } from "@/lib/constants";
 import { Alert, Badge, ConfigRequired, EmptyState, PageHeader, Section, fmtDate } from "@/components/ui";
 import { ActionForm, InlineAction, SelectField, SubmitButton, TextAreaField, TextField } from "@/components/forms";
+import { defaultOfferId, selectableOffers } from "@/lib/offer-choices";
 import { CopyButton } from "@/components/copy-button";
+import { offerFactsOf, unconfirmedAmounts, type OfferFacts } from "@/lib/price-guard";
 import { deleteAdAction, duplicateAdAction, generateAdsAction, toggleWinnerAction, updateAdAction } from "./actions";
 
 export const metadata: Metadata = { title: "AI Studio" };
@@ -23,11 +25,15 @@ export default async function AiStudioPage({ searchParams }: { searchParams: Pro
   const [ads, campaigns, offers, audiences, gens] = await Promise.all([
     db.ad.findMany({ where, orderBy: { createdAt: "desc" }, take: 60, include: { campaign: { select: { name: true } } } }),
     db.campaign.findMany({ where: { workspaceId: ctx.workspaceId, status: { not: "archived" } }, orderBy: { name: "asc" }, select: { id: true, name: true, offerId: true } }),
-    db.offer.findMany({ where: { workspaceId: ctx.workspaceId, status: { not: "archived" } }, orderBy: { name: "asc" }, select: { id: true, name: true } }),
+    db.offer.findMany({ where: { workspaceId: ctx.workspaceId }, orderBy: { name: "asc" }, select: { id: true, name: true, status: true, price: true, description: true, problem: true, advantages: true, differentiation: true } }),
     db.audience.findMany({ where: { workspaceId: ctx.workspaceId }, orderBy: { name: "asc" }, select: { id: true, name: true } }),
     db.aIGeneration.findMany({ where: { workspaceId: ctx.workspaceId, kind: "ad_copy" }, orderBy: { createdAt: "desc" }, take: 8 }),
   ]);
+  const offerFacts = new Map(offers.map((o) => [o.id, offerFactsOf(o)]));
+  const campaignOffer = new Map(campaigns.map((c) => [c.id, c.offerId]));
+  const allFacts: OfferFacts = { price: null, texts: offers.flatMap((o) => offerFactsOf(o).texts ?? []).concat(offers.map((o) => (o.price != null ? String(o.price) : null))) };
   const selectedCampaign = campaigns.find((c) => c.id === sp.campaignId);
+  const activeOffers = selectableOffers(offers, selectedCampaign?.offerId);
 
   return (
     <>
@@ -35,7 +41,7 @@ export default async function AiStudioPage({ searchParams }: { searchParams: Pro
       {!ai.configured ? <div className="mb-5"><ConfigRequired env={["OPENAI_API_KEY + OPENAI_MODEL", "ANTHROPIC_API_KEY", "GEMINI_API_KEY + GEMINI_MODEL"]}>Aucun fournisseur d'IA n'est configuré : la génération est indisponible. {ai.problem} Vous pouvez néanmoins créer et gérer vos annonces existantes ci-dessous.</ConfigRequired></div>
         : ctx.can("ai") && (
           <Section title="Générer des annonces" actions={<Badge tone="purple">{ai.provider} · {ai.model}</Badge>}>
-            {offers.length === 0 ? (
+            {activeOffers.length === 0 ? (
               <Alert tone="warning" title="Créez d'abord une offre">
                 Les annonces sont générées à partir d'une offre (produit, prix, avantages). Vous n'en avez aucune active pour le moment (ou toutes sont archivées).{" "}
                 <Link href="/offers?new=1#nouvelle" className="font-semibold underline">Créer une offre</Link>, puis revenez ici.
@@ -45,7 +51,7 @@ export default async function AiStudioPage({ searchParams }: { searchParams: Pro
                 <div className="grid gap-4 md:grid-cols-3">
                   <SelectField name="platform" label="Plateforme" required defaultValue="meta_ads" options={AD_PLATFORMS.map((p) => [p, PLATFORM_LABEL[p]] as const)} />
                   <SelectField name="campaignId" label="Campagne (optionnel)" defaultValue={sp.campaignId} options={campaigns.map((c) => [c.id, c.name] as const)} placeholder="— aucune —" />
-                  <SelectField name="offerId" label="Offre à promouvoir" required defaultValue={selectedCampaign?.offerId ?? offers[0]?.id} options={offers.map((o) => [o.id, o.name] as const)} help={<>Gérez vos offres dans <Link href="/offers" className="underline">Offers</Link>.</>} />
+                  <SelectField name="offerId" label="Offre à promouvoir" required defaultValue={defaultOfferId(activeOffers, selectedCampaign?.offerId)} options={activeOffers.map((o) => [o.id, o.name] as const)} help={<>Gérez vos offres dans <Link href="/offers" className="underline">Offers</Link>.</>} />
                   <SelectField name="audienceId" label="Audience (optionnel)" options={audiences.map((a) => [a.id, a.name] as const)} placeholder="— celle de la campagne, sinon aucune —" />
                   <TextField name="tone" label="Ton souhaité" placeholder="Ex. chaleureux, direct, expert" />
                   <SelectField name="count" label="Nombre de variantes (A/B)" required defaultValue="3" options={["1", "2", "3", "4", "5", "6", "8"]} />
@@ -67,11 +73,14 @@ export default async function AiStudioPage({ searchParams }: { searchParams: Pro
       {ads.length === 0 ? <EmptyState title="Aucune annonce">Générez vos premières variantes ci-dessus.</EmptyState> : (
         <ul className="grid gap-4 lg:grid-cols-2">
           {ads.map((a) => {
+            const oid = a.campaignId ? campaignOffer.get(a.campaignId) : undefined;
+            const facts = (oid && offerFacts.get(oid)) || allFacts;
+            const unconfirmed = a.source === "ai" ? unconfirmedAmounts([a.hook, a.headline, a.primaryText, a.description, a.cta].filter(Boolean).join(" "), facts) : [];
             const copy = [a.hook, a.headline, a.primaryText, a.description, a.cta && `CTA : ${a.cta}`].filter(Boolean).join("\n");
             return (
               <li key={a.id} className="rounded-xl border border-slate-200 bg-white p-4">
                 <div className="flex flex-wrap items-center gap-2 text-xs">
-                  <Badge tone="blue">{PLATFORM_LABEL[a.platform] ?? a.platform}</Badge>{a.variantLabel && <Badge>Variante {a.variantLabel}</Badge>}{a.source === "ai" && <Badge tone="purple">IA</Badge>}{a.isWinner && <Badge tone="green">🏆 Gagnante</Badge>}
+                  <Badge tone="blue">{PLATFORM_LABEL[a.platform] ?? a.platform}</Badge>{a.variantLabel && <Badge>Variante {a.variantLabel}</Badge>}{a.source === "ai" && <Badge tone="purple">IA</Badge>}{unconfirmed.length > 0 && <span title={`Montant(s) non fourni(s) dans l'offre : ${unconfirmed.join(", ")}`}><Badge tone="orange">montant non confirmé</Badge></span>}{a.isWinner && <Badge tone="green">🏆 Gagnante</Badge>}
                   <span className="ml-auto text-slate-500">{fmtDate(a.createdAt)}{a.campaign ? ` · ${a.campaign.name}` : ""}</span>
                 </div>
                 {a.hook && <p className="mt-2 text-sm italic text-slate-600">« {a.hook} »</p>}

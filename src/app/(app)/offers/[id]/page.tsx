@@ -4,6 +4,7 @@ import { notFound } from "next/navigation";
 import { db } from "@/lib/db";
 import { requireCtx } from "@/lib/tenant";
 import { providerStatus } from "@/lib/ai/providers";
+import { offerFactsOf, unconfirmedAmounts } from "@/lib/price-guard";
 import { Badge, Card, ConfigRequired, EmptyState, PageHeader, Section, fmtDate } from "@/components/ui";
 import { ActionForm, InlineAction, SelectField, SubmitButton } from "@/components/forms";
 import { OfferForm } from "../offer-form";
@@ -21,6 +22,7 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
   const audiences = await db.audience.findMany({ where: { workspaceId: ctx.workspaceId }, orderBy: { name: "asc" } });
   const variants = (Array.isArray(offer.variants) ? offer.variants : []) as unknown as Variant[];
   const ai = providerStatus();
+  const facts = offerFactsOf(offer);
 
   return (
     <>
@@ -47,6 +49,7 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
                     <h3 className="text-base font-semibold">{v.name}</h3>
                     <span className="text-xs text-slate-500">Proposition IA · {fmtDate(v.createdAt, true)}{v.model ? ` · ${v.model}` : ""}</span>
                   </div>
+                  {unconfirmedAmounts([v.headline, v.subheadline, v.valueProposition, v.cta, ...v.benefits, ...(v.guarantees ?? []), ...(v.bundles ?? []), ...(v.upsells ?? [])].join(" "), facts).length > 0 && <p className="mt-2"><Badge tone="orange">montant non confirmé</Badge> <span className="text-xs text-slate-500">Un montant de cette variante ne figure pas dans votre offre.</span></p>}
                   <p className="mt-2 text-lg font-bold">{v.headline}</p>
                   <p className="text-sm text-slate-700">{v.subheadline}</p>
                   <dl className="mt-3 grid gap-3 text-sm md:grid-cols-2">

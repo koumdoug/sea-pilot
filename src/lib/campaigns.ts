@@ -52,7 +52,7 @@ export async function duplicateCampaign(workspaceId: string, campaignId: string,
   const copy = await db.campaign.create({
     data: {
       workspaceId, name: `${c.name} (copie)`, objective: c.objective, platform: c.platform, budget: c.budget, budgetType: c.budgetType,
-      offerId: c.offerId, audienceId: c.audienceId, landingPageId: c.landingPageId, message: (c.message ?? undefined) as Prisma.InputJsonValue | undefined,
+      offerId: c.offerId, productId: c.productId, audienceId: c.audienceId, landingPageId: c.landingPageId, message: (c.message ?? undefined) as Prisma.InputJsonValue | undefined,
       tracking: (c.tracking ?? undefined) as Prisma.InputJsonValue | undefined, status: "draft", builderStep: c.builderStep, duplicatedFromId: c.id,
     },
   });

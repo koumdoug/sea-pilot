@@ -8,7 +8,7 @@ import { db } from "@/lib/db";
 import { audit } from "@/lib/audit";
 import { run, parse, formObject, optStr, UserError, type ActionState } from "@/lib/action";
 import {
-  addProspect, approveOutreachCampaign, attachProspectToCampaign, ensureDefaultProducts, importProspects, logContact, logReply, optOutProspect,
+  addProspect, approveOutreachCampaign, attachProspectToCampaign, eraseProspect, ensureDefaultProducts, importProspects, logContact, logReply, optOutProspect,
   PortfolioError, productSlugFor, recordProductEvent, reassignProspect,
 } from "@/lib/portfolio/service";
 import { dedupeKeyOf, EVENT_TYPES, LEGAL_BASES, OUTREACH_CHANNELS, PRODUCT_STATUSES, parseProspectCsv } from "@/lib/portfolio/rules";
@@ -260,6 +260,18 @@ export async function optOutAction(_: ActionState, fd: FormData): Promise<Action
     refresh();
     return { ok: true, message: "Prospect marqué « ne pas contacter »." };
   });
+}
+
+export async function eraseProspectAction(_: ActionState, fd: FormData): Promise<ActionState> {
+  let done = false;
+  const r = await run({ action: "delete" }, async (ctx) => {
+    const { prospectId } = parse(z.object({ prospectId: z.string() }), formObject(fd));
+    if (!(await eraseProspect({ workspaceId: ctx.workspaceId, prospectId, actorId: ctx.user.id }))) throw new UserError("Prospect introuvable.");
+    refresh();
+    done = true;
+  });
+  if (done) redirect("/prospects");
+  return r;
 }
 
 export async function reassignAction(_: ActionState, fd: FormData): Promise<ActionState> {

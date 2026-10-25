@@ -12,6 +12,8 @@ import {
 
 export class PortfolioError extends Error {}
 
+const ERASED_NAME = "Prospect effacé";
+
 const isUnique = (e: unknown) => typeof e === "object" && e !== null && (e as { code?: string }).code === "P2002";
 const json = (v: unknown) => v as Prisma.InputJsonValue;
 
@@ -172,6 +174,33 @@ export async function optOutProspect(p: { workspaceId: string; prospectId: strin
   return u;
 }
 
+/**
+ * Effacement (droit à l'effacement) : les données personnelles du prospect sont supprimées, la fiche est anonymisée et son adresse
+ * est conservée uniquement dans la liste de suppression pour ne jamais être recontactée ni réimportée. Idempotent.
+ * Les conversions déjà comptabilisées sont conservées sans note libre ; l'historique de contacts et les intérêts sont supprimés.
+ */
+export async function eraseProspect(p: { workspaceId: string; prospectId: string; actorId?: string | null }): Promise<boolean> {
+  const pr = await db.prospect.findFirst({ where: { id: p.prospectId, workspaceId: p.workspaceId } });
+  if (!pr) return false;
+  if (pr.name === ERASED_NAME && pr.deletedAt) return true; // rejeu
+  if (pr.email) await db.emailSuppression.upsert({ where: { workspaceId_email: { workspaceId: p.workspaceId, email: pr.email } }, create: { workspaceId: p.workspaceId, email: pr.email, reason: "prospect_erased" }, update: {} });
+  await db.$transaction([
+    db.prospectContact.deleteMany({ where: { workspaceId: p.workspaceId, prospectId: pr.id } }),
+    db.prospectProduct.deleteMany({ where: { workspaceId: p.workspaceId, prospectId: pr.id } }),
+    db.productEvent.updateMany({ where: { workspaceId: p.workspaceId, prospectId: pr.id }, data: { note: null } }),
+    db.prospect.update({
+      where: { id: pr.id },
+      data: {
+        name: ERASED_NAME, company: null, jobTitle: null, email: null, phone: null, websiteDomain: null, segment: null, source: "effacé", sourceUrl: null,
+        legalBasisNote: null, notes: null, importBatch: null, dedupeKey: `erased:${pr.id}`, status: "do_not_contact", optedOutAt: pr.optedOutAt ?? new Date(),
+        campaignId: null, nextFollowUpAt: null, deletedAt: new Date(),
+      },
+    }),
+  ]);
+  await audit({ workspaceId: p.workspaceId, userId: p.actorId, action: "prospect.erased", entity: "Prospect", entityId: pr.id });
+  return true;
+}
+
 // ───────────── Contact : éligibilité puis consignation (aucun envoi) ─────────────
 async function concurrentCampaignFor(workspaceId: string, prospect: Prospect, productId: string): Promise<boolean> {
   if (!prospect.campaignId) return false;
@@ -200,7 +229,8 @@ export async function logContact(p: {
   outcome?: string | null; actorId?: string | null; nextFollowUpAt?: Date | null; now?: Date;
 }): Promise<{ eligibility: Eligibility; prospect?: Prospect }> {
   if (!(OUTREACH_CHANNELS as readonly string[]).includes(p.channel)) throw new PortfolioError("Canal inconnu.");
-  const eligibility = await checkEligibility({ ...p, templateId: p.templateId ?? undefined });
+  // Un contact exige TOUJOURS un modèle approuvé du même produit et du même canal : « aucun modèle » est refusé (null, jamais undefined).
+  const eligibility = await checkEligibility({ ...p, templateId: p.templateId ?? null });
   if (!eligibility.ok) {
     await audit({ workspaceId: p.workspaceId, userId: p.actorId, action: "prospect.contact_refused", entity: "Prospect", entityId: p.prospectId, meta: { productId: p.productId, channel: p.channel, reasons: eligibility.reasons } });
     return { eligibility };
@@ -208,9 +238,11 @@ export async function logContact(p: {
   const now = p.now ?? new Date();
   const prospect = await db.$transaction(async (tx) => {
     await tx.prospectContact.create({ data: { workspaceId: p.workspaceId, prospectId: p.prospectId, productId: p.productId, channel: p.channel, direction: "outbound", templateId: p.templateId ?? null, subject: p.subject?.slice(0, 200) ?? null, summary: p.summary?.slice(0, 2000) ?? null, outcome: p.outcome ?? null, actorId: p.actorId ?? null } });
+    // Le statut ne passe à « contacté » que depuis « identifié » : un prospect en démo, en essai ou client ne recule jamais.
+    const cur = await tx.prospect.findUnique({ where: { id: p.prospectId }, select: { status: true } });
     return tx.prospect.update({
       where: { id: p.prospectId },
-      data: { contactCount: { increment: 1 }, lastContactedAt: now, nextFollowUpAt: p.nextFollowUpAt ?? null, status: "contacted" },
+      data: { contactCount: { increment: 1 }, lastContactedAt: now, nextFollowUpAt: p.nextFollowUpAt ?? null, ...(cur?.status === "identified" ? { status: "contacted" } : {}) },
     });
   });
   await audit({ workspaceId: p.workspaceId, userId: p.actorId, action: "prospect.contacted", entity: "Prospect", entityId: p.prospectId, meta: { productId: p.productId, channel: p.channel, templateId: p.templateId ?? null } });

@@ -7,7 +7,7 @@ import { Alert, Badge, Card, KeyValue, PageHeader, Section, TableWrap, Td, Th, f
 import { ActionForm, CheckField, InlineAction, SelectField, SubmitButton, TextAreaField, TextField } from "@/components/forms";
 import { checkEligibility } from "@/lib/portfolio/service";
 import { CHANNEL_LABEL, EVENT_LABEL, EVENT_TYPES, LEGAL_BASIS_LABEL, OUTREACH_CHANNELS, PROSPECT_STATUS_LABEL } from "@/lib/portfolio/rules";
-import { attachToCampaignAction, logContactAction, logReplyAction, optOutAction, reassignAction, recordEventAction } from "../../portfolio/actions";
+import { attachToCampaignAction, eraseProspectAction, logContactAction, logReplyAction, optOutAction, reassignAction, recordEventAction } from "../../portfolio/actions";
 
 export const metadata: Metadata = { title: "Prospect" };
 
@@ -65,7 +65,7 @@ export default async function ProspectPage({ params }: { params: Promise<{ id: s
             <ActionForm action={logContactAction} resetOnSuccess>
               <input type="hidden" name="prospectId" value={p.id} /><input type="hidden" name="productId" value={p.productId} />
               <SelectField name="channel" label="Canal" required options={OUTREACH_CHANNELS.map((c) => [c, CHANNEL_LABEL[c]] as const)} />
-              <SelectField name="templateId" label="Modèle approuvé utilisé" options={templates.map((t) => [t.id, `${t.name} · ${CHANNEL_LABEL[t.channel]}`] as const)} placeholder="— aucun —" help="Obligatoire pour les canaux couverts par une campagne approuvée." />
+              <SelectField name="templateId" label="Modèle approuvé utilisé" required options={templates.map((t) => [t.id, `${t.name} · ${CHANNEL_LABEL[t.channel]}`] as const)} placeholder="— choisir un modèle approuvé —" help={templates.length === 0 ? "Aucun modèle approuvé pour ce produit : approuvez-en un dans la fiche du produit avant de consigner un contact." : "Obligatoire : un contact n'est consigné qu'avec un modèle approuvé du même produit et du même canal."} />
               <TextField name="subject" label="Objet" />
               <TextAreaField name="summary" label="Résumé du message envoyé" rows={3} />
               <TextField name="nextFollowUp" label="Prochain suivi" type="date" />
@@ -133,6 +133,7 @@ export default async function ProspectPage({ params }: { params: Promise<{ id: s
           </ActionForm>
         )}
       </Section>
+      {ctx.can("delete") && <Section title="Effacement (droit à l'effacement)" description="Supprime les données personnelles de ce prospect (identité, coordonnées, notes, historique de contacts) et conserve seulement son adresse dans la liste de suppression pour ne jamais le recontacter. Irréversible."><InlineAction action={eraseProspectAction} variant="danger" hidden={{ prospectId: p.id }} confirm="Effacer définitivement les données de ce prospect ? Cette action est irréversible.">Effacer ce prospect</InlineAction></Section>}
       <Card className="text-xs text-slate-500">Toute opération sur ce prospect est inscrite au journal d'audit du portefeuille.</Card>
     </>
   );

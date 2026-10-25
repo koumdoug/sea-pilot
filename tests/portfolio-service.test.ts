@@ -134,12 +134,13 @@ describe("contact : éligibilité, consignation, désinscription", () => {
     await commercialise(workspaceId, driver.id);
     const { prospect } = await addProspect(workspaceId, person({ productId: driver.id }));
     const now = new Date("2026-11-01T10:00:00Z");
-    const ok = await logContact({ workspaceId, prospectId: prospect.id, productId: driver.id, channel: "email", summary: "Premier message", now });
+    const tpl = await db.messageTemplate.create({ data: { workspaceId, productId: driver.id, name: "T", channel: "email", body: "Bonjour, message approuvé.", status: "approved" } });
+    const ok = await logContact({ workspaceId, prospectId: prospect.id, productId: driver.id, channel: "email", templateId: tpl.id, summary: "Premier message", now });
     expect(ok.eligibility.ok).toBe(true);
     expect(ok.prospect).toMatchObject({ contactCount: 1, status: "contacted" });
-    const tooSoon = await logContact({ workspaceId, prospectId: prospect.id, productId: driver.id, channel: "email", now: new Date("2026-11-03T10:00:00Z") });
+    const tooSoon = await logContact({ workspaceId, prospectId: prospect.id, productId: driver.id, channel: "email", templateId: tpl.id, now: new Date("2026-11-03T10:00:00Z") });
     expect(tooSoon.eligibility.ok).toBe(false);
-    const later7 = await logContact({ workspaceId, prospectId: prospect.id, productId: driver.id, channel: "email", now: new Date("2026-11-09T10:00:00Z") });
+    const later7 = await logContact({ workspaceId, prospectId: prospect.id, productId: driver.id, channel: "email", templateId: tpl.id, now: new Date("2026-11-09T10:00:00Z") });
     expect(later7.eligibility.ok).toBe(true);
   });
   it("une personne attribuée à un produit ne peut pas être contactée pour un autre", async () => {

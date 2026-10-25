@@ -59,3 +59,12 @@ Points qui nécessitent une validation juridique :
 - Retour arrière du code : revenir au commit précédent ; les colonnes et tables ajoutées restent inertes (ancien code les ignore).
 - Retour arrière de la base (si nécessaire) : supprimer les 8 tables et les 5 colonnes ajoutées — uniquement après sauvegarde et décision explicite.
 - Le script `scripts/gen-pg-schema.mjs` ne régénère plus jamais `0001_init` (déjà appliquée en production).
+
+## Corrections de sécurité (revue du 2026-10-24)
+
+- **Contact et modèle approuvé :** consigner un contact exige désormais un modèle **approuvé**, du même produit et du même canal. « Aucun modèle » est refusé (avant : le contrôle était sauté).
+- **Statut :** un contact ne fait passer un prospect à « contacté » que depuis « identifié » ; démo, essai, client et « a répondu » ne reculent plus.
+- **Droit d'accès :** l'export de l'espace (`/api/export`) inclut produits, prospects, intérêts, contacts consignés, modèles, canaux, campagnes de prospection et conversions.
+- **Droit à l'effacement :** « Effacer ce prospect » (administrateur ou propriétaire) supprime les données personnelles et l'historique de contacts, anonymise la fiche et ne conserve l'adresse que dans la liste de suppression. Les conversions déjà comptées sont gardées sans note libre.
+- **Duplication de campagne :** la copie conserve son produit.
+- **Reste à faire :** recherche de prospects insensible à la casse sur PostgreSQL ; durée de conservation et purge automatique ; validation juridique.

@@ -12,11 +12,17 @@ export async function exportWorkspace(workspaceId: string) {
     db.metric.findMany({ where }), db.analyticsEvent.findMany({ where, take: 50_000, orderBy: { createdAt: "desc" } }), db.consent.findMany({ where }),
     db.aIGeneration.findMany({ where, take: 5_000, orderBy: { createdAt: "desc" } }), db.strategy.findMany({ where }), db.marketResearch.findMany({ where }),
   ]);
+  // Portefeuille multi-produits : produits, prospects (avec intérêts et contacts consignés), modèles, canaux, campagnes de prospection, conversions.
+  const [products, prospects, prospectProducts, prospectContacts, messageTemplates, outreachChannels, outreachCampaigns, productEvents] = await Promise.all([
+    db.product.findMany({ where }), db.prospect.findMany({ where }), db.prospectProduct.findMany({ where }), db.prospectContact.findMany({ where }),
+    db.messageTemplate.findMany({ where }), db.outreachChannel.findMany({ where }), db.outreachCampaign.findMany({ where }), db.productEvent.findMany({ where }),
+  ]);
   const integrations = (await db.integration.findMany({ where, select: { provider: true, status: true, accountName: true, connectedAt: true, lastSyncAt: true } }));
   return {
     exportedAt: new Date().toISOString(), format: "sea-pilot-export-v1",
     workspace, members: memberships.map((m) => ({ role: m.role, ...m.user })), offers, audiences, campaigns, landingPages, forms, leads, customers, contacts, conversations,
     qualifications, sequences, followUps, tasks, ads, keywords, metrics, analyticsEvents: events, consents, aiGenerations, strategies, researches, integrations,
+    products, prospects, prospectProducts, prospectContacts, messageTemplates, outreachChannels, outreachCampaigns, productEvents,
   };
 }
 

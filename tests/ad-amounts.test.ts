@@ -59,6 +59,12 @@ describe("confirmation des montants avec la devise de l'offre (D2)", () => {
     for (const [text, cur] of [["49 €", "EUR"], ["49 CAD", "CAD"], ["CA$49", "CAD"], ["US$49", "USD"], ["£49", "GBP"]] as const)
       expect(checkAdAmounts(text, offer(49, cur)), text).toMatchObject({ state: "confirmed", unconfirmed: [] });
   });
+  it("« 49 $ CA » et variantes face à une offre à 49 CAD : confirmé ; face à une offre USD : devise différente", () => {
+    for (const text of ["Dès 49 $ CA / mois", "Dès 49 $CA par mois", "Dès 49 $ CAD par mois", "Dès 49$ CA", "Dès 49 dollars canadiens"]) {
+      expect(checkAdAmounts(text, offer(49, "CAD")), text).toMatchObject({ state: "confirmed", unconfirmed: [] });
+      expect(checkAdAmounts(text, offer(49, "USD")).state, text).toBe("currency_mismatch");
+    }
+  });
   it("même montant, devises différentes : jamais confirmé (49 CAD vs 49 EUR)", () => {
     const r = checkAdAmounts("Dès 49 € / mois", offer(49, "CAD"));
     expect(r.state).toBe("currency_mismatch");

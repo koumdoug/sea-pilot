@@ -13,11 +13,12 @@ const TONE: Record<string, Tone> = { preparation: "gray", validation: "orange", 
 
 export default async function PortfolioPage() {
   const ctx = await requireCtx();
-  const [products, stats, channels, audits] = await Promise.all([
+  const [products, stats, channels, audits, due] = await Promise.all([
     db.product.findMany({ where: { workspaceId: ctx.workspaceId, deletedAt: null }, orderBy: { name: "asc" } }),
     portfolioStats(ctx.workspaceId),
     db.outreachChannel.findMany({ where: { workspaceId: ctx.workspaceId } }),
     db.auditLog.findMany({ where: { workspaceId: ctx.workspaceId, OR: [{ action: { startsWith: "product" } }, { action: { startsWith: "prospect." } }, { action: { startsWith: "outreach." } }] }, orderBy: { createdAt: "desc" }, take: 15 }),
+    db.prospect.findMany({ where: { workspaceId: ctx.workspaceId, deletedAt: null, optedOutAt: null, status: { notIn: ["customer", "lost", "do_not_contact"] }, nextFollowUpAt: { lte: new Date() } }, orderBy: { nextFollowUpAt: "asc" }, take: 10, select: { id: true, name: true, company: true, productId: true, nextFollowUpAt: true } }),
   ]);
   const canManage = ctx.can("manage_products");
   const nameOf = new Map(products.map((p) => [p.id, p.name]));
@@ -97,6 +98,14 @@ export default async function PortfolioPage() {
 
           {canManage && <div className="mb-5"><InlineAction action={initCatalogAction}>Ajouter les fiches par défaut manquantes</InlineAction></div>}
         </>
+      )}
+
+      {due.length > 0 && (
+        <Section title={`Suivis à faire (${due.length})`} description="Prospects dont la date de suivi est atteinte. Rien n'est envoyé automatiquement : vous décidez du contact.">
+          <ul className="divide-y divide-slate-100 text-sm">
+            {due.map((d) => <li key={d.id} className="flex flex-wrap items-center justify-between gap-2 py-2"><Link href={`/prospects/${d.id}`} className="font-medium text-brand-700 underline">{d.name}{d.company ? ` · ${d.company}` : ""}</Link><span className="text-xs text-slate-500">{d.productId ? nameOf.get(d.productId) ?? "" : "non attribué"} · prévu le {fmtDate(d.nextFollowUpAt)}</span></li>)}
+          </ul>
+        </Section>
       )}
 
       <Section title="Journal des opérations" description="Dernières opérations du portefeuille (produits, prospects, contacts, approbations).">

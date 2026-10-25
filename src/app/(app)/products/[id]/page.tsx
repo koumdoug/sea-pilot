@@ -218,7 +218,7 @@ export default async function ProductPage({ params }: { params: Promise<{ id: st
           </details>
         )}
       </Section>
-      <Card className="text-xs text-slate-500">Conversions par webhook : non connectées. La table et la clé anti-doublon sont prêtes (source « webhook »), mais aucun des trois SaaS n'envoie d'événements pour l'instant.</Card>
+      <Card className="text-xs text-slate-500">Conversions automatiques : l'interface <code>POST /api/v1/product-events</code> est prête (clé API de Paramètres, idempotente, source « webhook »), mais aucun des trois SaaS n'y envoie d'événements pour l'instant : non connectée.</Card>
     </>
   );
 }

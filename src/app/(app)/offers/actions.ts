@@ -140,13 +140,15 @@ export async function createPageFromVariantAction(_: ActionState, fd: FormData):
 }
 
 const audienceSchema = z.object({
-  id: z.string().optional(), name: z.string().trim().min(2, "Nom requis").max(120), type: z.enum(["b2b", "b2c"]), customerType: optStr(200), location: optStr(200), needs: optStr(800), problems: optStr(800), objections: optStr(800),
+  id: z.string().optional(), name: z.string().trim().min(2, "Nom requis").max(120), type: z.enum(["b2b", "b2c"]), customerType: optStr(200), location: optStr(200), needs: optStr(800), problems: optStr(800), objections: optStr(800), productId: optStr(60),
 });
 
 export async function saveAudienceAction(_: ActionState, fd: FormData): Promise<ActionState> {
   return run({ action: "write" }, async (ctx) => {
     const d = parse(audienceSchema, formObject(fd));
-    const { id, ...rest } = d;
+    if (d.productId && !(await db.product.findFirst({ where: { id: d.productId, workspaceId: ctx.workspaceId, deletedAt: null }, select: { id: true } }))) throw new UserError("Produit introuvable.");
+    const { id, ...fields } = d;
+    const rest = { ...fields, productId: d.productId ?? null };
     if (id) {
       const u = await db.audience.updateMany({ where: { id, workspaceId: ctx.workspaceId }, data: rest });
       if (!u.count) throw new UserError("Audience introuvable.");

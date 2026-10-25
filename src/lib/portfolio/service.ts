@@ -317,7 +317,8 @@ export async function recordProductEvent(i: RecordEventInput): Promise<{ created
       },
     });
     const next = STATUS_AFTER_EVENT[i.type as ProductEventType];
-    if (i.prospectId && next) await db.prospect.updateMany({ where: { id: i.prospectId, workspaceId: i.workspaceId }, data: { status: next, campaignId: null } });
+    // Un prospect qui s'est opposé à tout contact garde son statut « ne pas contacter » : la conversion est comptée, pas son statut.
+    if (i.prospectId && next) await db.prospect.updateMany({ where: { id: i.prospectId, workspaceId: i.workspaceId, optedOutAt: null }, data: { status: next, campaignId: null } });
     await audit({ workspaceId: i.workspaceId, userId: i.actorId, action: "product_event.recorded", entity: "ProductEvent", entityId: ev.id, meta: { productId: i.productId, type: i.type, source: i.source ?? "manual" } });
     return { created: true, id: ev.id };
   } catch (e) {

@@ -56,21 +56,21 @@ export default async function OffersPage({ searchParams }: { searchParams: Promi
                 <details>
                   <summary className="flex cursor-pointer items-center justify-between gap-2 text-sm font-semibold">{a.name} <Badge tone="blue">{a.type.toUpperCase()}</Badge></summary>
                   <div className="mt-3">
-                    <AudienceForm audience={a} canWrite={canWrite} />
+                    <AudienceForm audience={a} canWrite={canWrite} products={products} />
                     {ctx.can("delete") && <div className="mt-2"><InlineAction action={deleteAudienceAction} variant="danger" hidden={{ id: a.id }} confirm="Supprimer cette audience ?">Supprimer</InlineAction></div>}
                   </div>
                 </details>
               </li>
             ))}
           </ul>
-          {canWrite && <details className="rounded-lg border border-dashed border-slate-300 p-3"><summary className="cursor-pointer text-sm font-semibold text-brand-700">Ajouter une audience</summary><div className="mt-3"><AudienceForm canWrite /></div></details>}
+          {canWrite && <details className="rounded-lg border border-dashed border-slate-300 p-3"><summary className="cursor-pointer text-sm font-semibold text-brand-700">Ajouter une audience</summary><div className="mt-3"><AudienceForm canWrite products={products} /></div></details>}
         </Section>
       </div>
     </>
   );
 }
 
-function AudienceForm({ audience, canWrite }: { audience?: { id: string; name: string; type: string; customerType: string | null; location: string | null; needs: string | null; problems: string | null; objections: string | null }; canWrite: boolean }) {
+function AudienceForm({ audience, canWrite, products = [] }: { audience?: { id: string; name: string; type: string; customerType: string | null; location: string | null; needs: string | null; problems: string | null; objections: string | null; productId: string | null }; canWrite: boolean; products?: { id: string; name: string }[] }) {
   if (!canWrite) return <p className="text-sm text-slate-600">{audience?.needs}</p>;
   return (
     <ActionForm action={saveAudienceAction} resetOnSuccess={!audience}>
@@ -84,6 +84,7 @@ function AudienceForm({ audience, canWrite }: { audience?: { id: string; name: s
       <TextAreaField name="needs" label="Besoins" rows={2} defaultValue={audience?.needs} />
       <TextAreaField name="problems" label="Problèmes" rows={2} defaultValue={audience?.problems} />
       <TextAreaField name="objections" label="Objections" rows={2} defaultValue={audience?.objections} />
+      {products.length > 0 && <SelectField name="productId" label="Produit du portefeuille" defaultValue={audience?.productId} options={products.map((p) => [p.id, p.name] as const)} placeholder="— tous produits —" help="Segment propre à un produit (facultatif)." />}
       <SubmitButton>{audience ? "Enregistrer" : "Ajouter l'audience"}</SubmitButton>
     </ActionForm>
   );

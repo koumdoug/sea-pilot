@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import type { Prisma } from "@prisma/client";
-import { db } from "@/lib/db";
+import { containsCi, db } from "@/lib/db";
 import { requireCtx } from "@/lib/tenant";
 import { Alert, Badge, EmptyState, PageHeader, Section, TableWrap, Td, Th, fmtDate, type Tone } from "@/components/ui";
 import { ActionForm, CheckField, SelectField, SubmitButton, TextAreaField, TextField } from "@/components/forms";
@@ -18,7 +18,7 @@ export default async function ProspectsPage({ searchParams }: { searchParams: Pr
   if (sp.product === "none") where.productId = null;
   else if (sp.product) where.productId = sp.product;
   if (sp.status && (PROSPECT_STATUSES as readonly string[]).includes(sp.status)) where.status = sp.status;
-  if (sp.q?.trim()) where.OR = [{ name: { contains: sp.q.trim() } }, { company: { contains: sp.q.trim() } }, { email: { contains: sp.q.trim().toLowerCase() } }];
+  if (sp.q?.trim()) where.OR = [{ name: containsCi(sp.q.trim()) }, { company: containsCi(sp.q.trim()) }, { email: containsCi(sp.q.trim()) }];
   const [prospects, products, total] = await Promise.all([
     db.prospect.findMany({ where, orderBy: { createdAt: "desc" }, take: 100, include: { interests: { select: { productId: true } } } }),
     db.product.findMany({ where: { workspaceId: ctx.workspaceId, deletedAt: null }, orderBy: { name: "asc" }, select: { id: true, name: true } }),

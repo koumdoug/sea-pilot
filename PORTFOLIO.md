@@ -68,3 +68,10 @@ Points qui nécessitent une validation juridique :
 - **Droit à l'effacement :** « Effacer ce prospect » (administrateur ou propriétaire) supprime les données personnelles et l'historique de contacts, anonymise la fiche et ne conserve l'adresse que dans la liste de suppression. Les conversions déjà comptées sont gardées sans note libre.
 - **Duplication de campagne :** la copie conserve son produit.
 - **Reste à faire :** recherche de prospects insensible à la casse sur PostgreSQL ; durée de conservation et purge automatique ; validation juridique.
+
+## Compléments (2026-10-25)
+
+- **Migration 0002 essayée sur un vrai PostgreSQL 18** (local, jetable, hors dépôt) : 0001 appliquée avec données historiques puis 0002 → données identiques, 5 colonnes `productId` nullables sans valeur imposée, 8 tables, 11 clés étrangères, 5 index uniques, aucune dérive entre la base et le schéma, rejeu sans effet, doublon de `dedupeKey` refusé par la base, suppression en cascade de l'espace. Reste à faire avant la production : sauvegarde de la base réelle.
+- **API des conversions** `POST /api/v1/product-events` (clé API, idempotente, 60 requêtes/minute, source « webhook ») : prête et testée, **non connectée** — aucun des trois SaaS n'y envoie d'événement.
+- **Audiences** : rattachement facultatif à un produit. **Recherche de prospects** insensible à la casse (SQLite et PostgreSQL). **Suivis à faire** affichés sur la page Portefeuille.
+- Un prospect opposé garde son statut « ne pas contacter » même lorsqu'une conversion est enregistrée.

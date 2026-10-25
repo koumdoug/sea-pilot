@@ -9,7 +9,8 @@ import { Alert, Badge, ConfigRequired, EmptyState, PageHeader, Section, fmtDate 
 import { ActionForm, InlineAction, SelectField, SubmitButton, TextAreaField, TextField } from "@/components/forms";
 import { defaultOfferId, selectableOffers } from "@/lib/offer-choices";
 import { CopyButton } from "@/components/copy-button";
-import { offerFactsOf, unconfirmedAmounts, type OfferFacts } from "@/lib/price-guard";
+import { adBadge } from "@/lib/price-guard";
+import { adAmountChecks } from "@/lib/ad-amounts";
 import { deleteAdAction, duplicateAdAction, generateAdsAction, toggleWinnerAction, updateAdAction } from "./actions";
 
 export const metadata: Metadata = { title: "AI Studio" };
@@ -23,15 +24,14 @@ export default async function AiStudioPage({ searchParams }: { searchParams: Pro
   if (sp.platform && (AD_PLATFORMS as readonly string[]).includes(sp.platform)) where.platform = sp.platform;
   if (sp.winners === "1") where.isWinner = true;
   const [ads, campaigns, offers, audiences, gens] = await Promise.all([
-    db.ad.findMany({ where, orderBy: { createdAt: "desc" }, take: 60, include: { campaign: { select: { name: true } } } }),
+    db.ad.findMany({ where, orderBy: { createdAt: "desc" }, take: 60, include: { campaign: { select: { name: true, offerId: true } } } }),
     db.campaign.findMany({ where: { workspaceId: ctx.workspaceId, status: { not: "archived" } }, orderBy: { name: "asc" }, select: { id: true, name: true, offerId: true } }),
-    db.offer.findMany({ where: { workspaceId: ctx.workspaceId }, orderBy: { name: "asc" }, select: { id: true, name: true, status: true, price: true, description: true, problem: true, advantages: true, differentiation: true } }),
+    db.offer.findMany({ where: { workspaceId: ctx.workspaceId }, orderBy: { name: "asc" }, select: { id: true, name: true, status: true, price: true, currency: true, description: true, problem: true, advantages: true, differentiation: true } }),
     db.audience.findMany({ where: { workspaceId: ctx.workspaceId }, orderBy: { name: "asc" }, select: { id: true, name: true } }),
     db.aIGeneration.findMany({ where: { workspaceId: ctx.workspaceId, kind: "ad_copy" }, orderBy: { createdAt: "desc" }, take: 8 }),
   ]);
-  const offerFacts = new Map(offers.map((o) => [o.id, offerFactsOf(o)]));
-  const campaignOffer = new Map(campaigns.map((c) => [c.id, c.offerId]));
-  const allFacts: OfferFacts = { price: null, texts: offers.flatMap((o) => offerFactsOf(o).texts ?? []).concat(offers.map((o) => (o.price != null ? String(o.price) : null))) };
+  // Verdict des montants : offre de la génération, à défaut de la campagne ; jamais une autre offre sans rapport.
+  const amountChecks = await adAmountChecks(ctx.workspaceId, ads, offers);
   const selectedCampaign = campaigns.find((c) => c.id === sp.campaignId);
   const activeOffers = selectableOffers(offers, selectedCampaign?.offerId);
 
@@ -73,14 +73,12 @@ export default async function AiStudioPage({ searchParams }: { searchParams: Pro
       {ads.length === 0 ? <EmptyState title="Aucune annonce">Générez vos premières variantes ci-dessus.</EmptyState> : (
         <ul className="grid gap-4 lg:grid-cols-2">
           {ads.map((a) => {
-            const oid = a.campaignId ? campaignOffer.get(a.campaignId) : undefined;
-            const facts = (oid && offerFacts.get(oid)) || allFacts;
-            const unconfirmed = a.source === "ai" ? unconfirmedAmounts([a.hook, a.headline, a.primaryText, a.description, a.cta].filter(Boolean).join(" "), facts) : [];
+            const badge = adBadge(amountChecks.get(a.id));
             const copy = [a.hook, a.headline, a.primaryText, a.description, a.cta && `CTA : ${a.cta}`].filter(Boolean).join("\n");
             return (
               <li key={a.id} className="rounded-xl border border-slate-200 bg-white p-4">
                 <div className="flex flex-wrap items-center gap-2 text-xs">
-                  <Badge tone="blue">{PLATFORM_LABEL[a.platform] ?? a.platform}</Badge>{a.variantLabel && <Badge>Variante {a.variantLabel}</Badge>}{a.source === "ai" && <Badge tone="purple">IA</Badge>}{unconfirmed.length > 0 && <span title={`Montant(s) non fourni(s) dans l'offre : ${unconfirmed.join(", ")}`}><Badge tone="orange">montant non confirmé</Badge></span>}{a.isWinner && <Badge tone="green">🏆 Gagnante</Badge>}
+                  <Badge tone="blue">{PLATFORM_LABEL[a.platform] ?? a.platform}</Badge>{a.variantLabel && <Badge>Variante {a.variantLabel}</Badge>}{a.source === "ai" && <Badge tone="purple">IA</Badge>}{badge && <span title={badge.detail}><Badge tone="orange">{badge.label}</Badge></span>}{a.isWinner && <Badge tone="green">🏆 Gagnante</Badge>}
                   <span className="ml-auto text-slate-500">{fmtDate(a.createdAt)}{a.campaign ? ` · ${a.campaign.name}` : ""}</span>
                 </div>
                 {a.hook && <p className="mt-2 text-sm italic text-slate-600">« {a.hook} »</p>}

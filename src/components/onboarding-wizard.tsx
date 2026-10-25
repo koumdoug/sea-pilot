@@ -2,6 +2,7 @@
 
 import { useRef, useState } from "react";
 import { ActionForm, CheckField, SelectField, SubmitButton, TextAreaField, TextField } from "./forms";
+import { applyMarginCheck, MarginField } from "./margin-field";
 import { buttonClass, cx } from "./ui";
 import type { ActionState } from "@/lib/action";
 import { COMPANY_SIZES, CURRENCIES, LANGUAGES } from "@/lib/constants";
@@ -13,6 +14,9 @@ export function OnboardingWizard({ action, defaults }: { action: (p: ActionState
   const box = useRef<HTMLDivElement>(null);
 
   function next() {
+    // Contrôle d'unité de la marge (étape « Offre ») : bloque l'avancée, message visible près du champ ; effacé dès que la valeur ou la case change.
+    const stepRoot = box.current?.querySelector<HTMLElement>(`[data-step="${step}"]`);
+    if (stepRoot && applyMarginCheck(stepRoot)) { stepRoot.querySelector<HTMLInputElement>('input[name="marginPct"]')?.reportValidity(); return; }
     const els = box.current?.querySelectorAll<HTMLElement>(`[data-step="${step}"] input, [data-step="${step}"] select, [data-step="${step}"] textarea`);
     for (const el of Array.from(els ?? [])) {
       const f = el as HTMLInputElement;
@@ -50,7 +54,7 @@ export function OnboardingWizard({ action, defaults }: { action: (p: ActionState
           <TextField name="offerName" label="Produit ou service" required />
           <div className="grid gap-4 sm:grid-cols-2">
             <TextField name="price" label="Prix (devise ci-dessus)" type="number" min={0} step="0.01" help="Prix moyen d'une vente." />
-            <TextField name="marginPct" label="Marge approximative (%)" type="number" min={0} max={100} step="0.1" />
+            <MarginField />
           </div>
           <TextField name="geoZone" label="Zone géographique desservie" placeholder="Ex. Lyon et sa région, France entière…" />
           <TextAreaField name="advantages" label="Avantages (un par ligne)" rows={3} />

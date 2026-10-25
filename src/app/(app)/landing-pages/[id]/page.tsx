@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { db } from "@/lib/db";
 import { env } from "@/lib/env";
+import { fmtPct } from "@/lib/kpi";
 import { requireCtx } from "@/lib/tenant";
 import { DEFAULT_CONSENT, DEFAULT_FORM_FIELDS, formFieldsSchema, pageUrl, parseSections, themeSchema } from "@/lib/landing";
 import { Alert, Badge, PageHeader, StatTile, type Tone, fmtDate } from "@/components/ui";
@@ -44,7 +45,7 @@ export default async function LandingEditorPage({ params }: { params: Promise<{ 
         </> : undefined} />
       <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-4">
         <StatTile label="Visites" value={views} /><StatTile label="Clics sur le bouton" value={clicks} /><StatTile label="Leads" value={leads} />
-        <StatTile label="Conversion" value={views > 0 ? `${((leads / views) * 100).toFixed(1)} %` : "—"} hint={views === 0 ? "aucune visite mesurée" : undefined} />
+        <StatTile label="Conversion" value={views > 0 ? fmtPct(leads / views) : "—"} hint={views === 0 ? "aucune visite mesurée" : undefined} />
       </div>
       {page.status === "published" ? <div className="mb-5"><Alert tone="success">Page publique : <a className="break-all underline" href={url} target="_blank" rel="noopener noreferrer">{url}</a> — ajoutez <code>?utm_source=…&utm_medium=…&utm_campaign=…</code> à vos liens pour suivre l'origine des leads.</Alert></div>
         : <div className="mb-5"><Alert tone="info">Cette page n'est pas publique. Adresse après publication : <code className="break-all">{url}</code></Alert></div>}

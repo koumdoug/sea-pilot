@@ -6,6 +6,8 @@ import type { ActionState } from "@/lib/action";
 import { Alert, buttonClass, cx } from "./ui";
 
 const FormCtx = createContext<ActionState>({});
+/** Valeur à réafficher après un rejet : celle que l'action a renvoyée dans `values` (seulement offre et onboarding) ; sinon undefined et le comportement habituel s'applique. */
+const kept = (s: ActionState, name: string): string | undefined => (s.values && name in s.values ? s.values[name] : undefined);
 
 /** Formulaire branché sur une server action : gère erreurs globales, erreurs par champ, succès et réinitialisation. */
 export function ActionForm({ action, children, className, resetOnSuccess = false, hideSuccess = false }: {
@@ -61,7 +63,7 @@ export function TextField(p: Common & { type?: string; defaultValue?: string | n
   const error = s.fieldErrors?.[p.name];
   return (
     <Wrap {...p} id={id} error={error}>
-      <input id={id} name={p.name} type={p.type ?? "text"} required={p.required} defaultValue={p.defaultValue ?? undefined} placeholder={p.placeholder} autoComplete={p.autoComplete}
+      <input id={id} name={p.name} type={p.type ?? "text"} required={p.required} defaultValue={kept(s, p.name) ?? p.defaultValue ?? undefined} placeholder={p.placeholder} autoComplete={p.autoComplete}
         min={p.min} max={p.max} step={p.step} maxLength={p.maxLength} readOnly={p.readOnly}
         aria-invalid={!!error} aria-describedby={[p.help && `${id}-help`, error && `${id}-err`].filter(Boolean).join(" ") || undefined} className={inputCls} />
     </Wrap>
@@ -74,7 +76,7 @@ export function TextAreaField(p: Common & { defaultValue?: string | null; rows?:
   const error = s.fieldErrors?.[p.name];
   return (
     <Wrap {...p} id={id} error={error}>
-      <textarea id={id} name={p.name} required={p.required} rows={p.rows ?? 4} defaultValue={p.defaultValue ?? undefined} placeholder={p.placeholder} maxLength={p.maxLength}
+      <textarea id={id} name={p.name} required={p.required} rows={p.rows ?? 4} defaultValue={kept(s, p.name) ?? p.defaultValue ?? undefined} placeholder={p.placeholder} maxLength={p.maxLength}
         aria-invalid={!!error} aria-describedby={[p.help && `${id}-help`, error && `${id}-err`].filter(Boolean).join(" ") || undefined} className={inputCls} />
     </Wrap>
   );
@@ -86,7 +88,7 @@ export function SelectField(p: Common & { options: readonly (string | readonly [
   const error = s.fieldErrors?.[p.name];
   return (
     <Wrap {...p} id={id} error={error}>
-      <select id={id} name={p.name} required={p.required} defaultValue={p.defaultValue ?? ""} aria-invalid={!!error} aria-describedby={error ? `${id}-err` : undefined} className={inputCls}>
+      <select id={id} name={p.name} required={p.required} defaultValue={kept(s, p.name) ?? p.defaultValue ?? ""} aria-invalid={!!error} aria-describedby={error ? `${id}-err` : undefined} className={inputCls}>
         {(p.placeholder !== undefined || !p.required) && <option value="">{p.placeholder ?? "—"}</option>}
         {p.options.map((o) => { const [v, l] = typeof o === "string" ? [o, o] : o; return <option key={v} value={v}>{l}</option>; })}
       </select>
@@ -101,7 +103,7 @@ export function CheckField({ name, label, defaultChecked, help, required }: { na
   return (
     <div>
       <div className="flex items-start gap-2">
-        <input id={id} type="checkbox" name={name} value="on" defaultChecked={defaultChecked} required={required} aria-invalid={!!error} className="mt-1 size-4 shrink-0 rounded border-slate-300" />
+        <input id={id} type="checkbox" name={name} value="on" defaultChecked={s.values ? name in s.values : defaultChecked} required={required} aria-invalid={!!error} className="mt-1 size-4 shrink-0 rounded border-slate-300" />
         <label htmlFor={id} className="text-sm text-slate-800">{label}</label>
       </div>
       {help && <p className="ml-6 mt-0.5 text-xs text-slate-500">{help}</p>}

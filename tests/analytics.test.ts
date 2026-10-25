@@ -82,7 +82,10 @@ describe("recommandations", () => {
     const { workspaceId } = await makeWorkspace();
     await db.workspace.update({ where: { id: workspaceId }, data: { maxCac: 100 } });
     const dead = await db.campaign.create({ data: { workspaceId, name: "Morte", status: "active" } });
-    await db.metric.create({ data: { workspaceId, campaignId: dead.id, platform: "tiktok_ads", date: new Date(`${today()}T00:00:00Z`), spend: 200, impressions: 9000, clicks: 80, dedupeKey: "d" } });
+    // Seuil explicite : au moins 100 clics sans référence de conversion, et un suivi plausible (visites mesurées ≥ 50 % des clics)
+    await db.metric.create({ data: { workspaceId, campaignId: dead.id, platform: "tiktok_ads", date: new Date(`${today()}T00:00:00Z`), spend: 200, impressions: 9000, clicks: 300, dedupeKey: "d" } });
+    const page = await db.landingPage.create({ data: { workspaceId, name: "P", slug: "p", status: "published", sections: [] } });
+    await db.analyticsEvent.createMany({ data: Array.from({ length: 200 }, () => ({ workspaceId, type: "page_view", landingPageId: page.id })) });
     const { lead } = await createLead({ workspaceId, name: "Vieux", email: "v@x.com" });
     await db.lead.update({ where: { id: lead.id }, data: { createdAt: new Date(Date.now() - 5 * 86_400_000), status: "new" } });
     const ins = await loadInsights(workspaceId, range());
@@ -91,7 +94,7 @@ describe("recommandations", () => {
     expect(types).toContain("stale_leads");
     const u = ins.recommendations.find((r) => r.type === "underperforming")!;
     expect(u.priority).toBe("high");
-    expect(u.evidence.join(" ")).toMatch(/80 clics/);
+    expect(u.evidence.join(" ")).toMatch(/300 clics/);
     expect(u.action.length).toBeGreaterThan(10);
     expect(u.impact.length).toBeGreaterThan(10);
   });
@@ -107,13 +110,16 @@ describe("recommandations", () => {
     const k = (o: Partial<ReturnType<typeof emptyTotals>>) => computeKpis({ ...emptyTotals(), ...o });
     const campaigns = [
       { id: "a", name: "A", status: "active", kpis: k({ spend: 100, impressions: 50000, clicks: 100, leads: 3 }) },
-      { id: "b", name: "B", status: "active", kpis: k({ spend: 100, impressions: 5000, clicks: 100, leads: 30, customers: 6, revenue: 900, customersWithRevenue: 6, qualifiedLeads: 10 }) },
+      { id: "b", name: "B", status: "active", marginPct: 40, kpis: k({ spend: 100, impressions: 5000, clicks: 100, leads: 30, customers: 6, revenue: 900, customersWithRevenue: 6, qualifiedLeads: 10 }) }, // marge valide : plancher 100/40 = 2,5 ≤ ROAS 9
     ];
     const overall = k({ spend: 200, impressions: 55000, clicks: 200, leads: 33, customers: 6, revenue: 900, customersWithRevenue: 6 });
-    const recs = buildRecommendations({ overall, previous: k({ spend: 200, clicks: 400, leads: 80 }), campaigns, pages: [{ id: "p", name: "P", views: 200, leads: 1 }], goals: { maxCac: 10 }, staleNewLeads: 0, periodDays: 30 });
+    const args = { overall, previous: k({ spend: 200, clicks: 400, leads: 80 }), campaigns, pages: [{ id: "p", name: "P", views: 400, leads: 2 }], goals: { maxCac: 10 }, staleNewLeads: 0, periodDays: 30 };
+    // Lot B1-1 : le scaling n'existe que si un facteur de sécurité est défini ; il est injecté ici (test seulement), la valeur par défaut reste null.
+    const recs = buildRecommendations({ ...args, scalingSafetyFactor: 1.2 });
     const types = recs.map((r) => r.type);
     expect(types).toEqual(expect.arrayContaining(["ctr_low", "high_conversion", "scaling", "lead_drop", "landing_weak", "cac_high"]));
     expect(recs[0].priority).toBe("high"); // triées par priorité
+    expect(buildRecommendations(args).map((r) => r.type)).not.toContain("scaling"); // par défaut (facteur null) : jamais de scaling
   });
 });
 

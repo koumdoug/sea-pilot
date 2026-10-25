@@ -1,5 +1,6 @@
 import type { Audience, Offer } from "@prisma/client";
 import { ActionForm, SelectField, SubmitButton, TextAreaField, TextField } from "@/components/forms";
+import { MarginField } from "@/components/margin-field";
 import { CURRENCIES } from "@/lib/constants";
 import { saveOfferAction } from "./actions";
 
@@ -14,7 +15,7 @@ export function OfferForm({ offer, audiences, currency, products = [] }: { offer
       <div className="grid gap-4 sm:grid-cols-3">
         <TextField name="price" label="Prix" type="number" min={0} step="0.01" defaultValue={offer?.price} />
         <SelectField name="currency" label="Devise" required defaultValue={offer?.currency ?? currency} options={CURRENCIES} />
-        <TextField name="marginPct" label="Marge approximative (%)" type="number" min={0} max={100} step="0.1" defaultValue={offer?.marginPct} />
+        <MarginField defaultValue={offer?.marginPct} />
       </div>
       <TextField name="geoZone" label="Zone géographique" defaultValue={offer?.geoZone} />
       <TextAreaField name="advantages" label="Avantages (un par ligne)" rows={3} defaultValue={adv} />

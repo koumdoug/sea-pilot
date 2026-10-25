@@ -1,4 +1,5 @@
 import { cx } from "./ui";
+import { fmtPct } from "@/lib/kpi";
 
 // Graphiques SVG sans dépendance : lisibles, accessibles (role="img" + tableau équivalent), aucune donnée inventée.
 
@@ -79,7 +80,7 @@ export function Funnel({ steps, className }: { steps: { label: string; value: nu
     <ol className={cx("space-y-2", className)} aria-label="Entonnoir de conversion">
       {steps.map((s, i) => {
         const prev = i > 0 ? steps[i - 1].value : null;
-        const rate = prev && prev > 0 ? `${((s.value / prev) * 100).toFixed(1)} % de l'étape précédente` : null;
+        const rate = prev && prev > 0 ? `${fmtPct(s.value / prev)} de l'étape précédente` : null;
         return (
           <li key={s.label}>
             <div className="flex items-baseline justify-between text-sm"><span>{s.label}</span><span className="tabular-nums font-semibold">{new Intl.NumberFormat("fr-FR").format(s.value)}</span></div>

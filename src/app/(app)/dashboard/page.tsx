@@ -10,6 +10,7 @@ import { Funnel, LineChart } from "@/components/charts";
 import { InlineAction } from "@/components/forms";
 import { markNotificationsReadAction } from "./actions";
 import { RecommendationList } from "@/components/recommendation-list";
+import { ScopeBreakdown } from "@/components/scope-breakdown";
 import { PLATFORM_LABEL } from "@/lib/constants";
 
 export const metadata: Metadata = { title: "Dashboard" };
@@ -85,16 +86,18 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
         <StatTile label="CTR" value={fmtPct(k.ctr, 2)} />
         <StatTile label="CPC" value={fmtMoney(k.cpc, cur)} />
         <StatTile label="Leads" value={fmtNum(k.leads)} />
-        <StatTile label="CPL" value={fmtMoney(k.cpl, cur)} />
+        <StatTile label="CPL" value={fmtMoney(k.cpl, cur)} hint={a.unattributed.leads > 0 ? "global : inclut les leads non attribués" : undefined} />
         <StatTile label="Taux de conversion" value={fmtPct(k.cvr)} hint="leads ÷ clics" />
         <StatTile label="Prospects qualifiés" value={fmtNum(k.qualifiedLeads)} hint={k.qualificationRate !== null ? `${fmtPct(k.qualificationRate, 0)} des leads` : undefined} />
         <StatTile label="Clients" value={fmtNum(k.customers)} />
         <StatTile label="CAC" value={fmtMoney(k.cac, cur)} tone={k.cac !== null && ctx.workspace.maxCac && k.cac > ctx.workspace.maxCac ? "red" : undefined} hint={ctx.workspace.maxCac ? `max visé : ${fmtMoney(ctx.workspace.maxCac, cur)}` : undefined} />
-        <StatTile label="CA attribué" value={k.revenue > 0 ? fmtMoney(k.revenue, cur) : "—"} />
+        <StatTile label="CA réalisé (global)" value={k.revenue > 0 ? fmtMoney(k.revenue, cur) : "—"} hint={a.attributed.revenue > 0 && a.attributed.revenue !== k.revenue ? `dont rattaché aux campagnes : ${fmtMoney(a.attributed.revenue, cur)}` : undefined} />
         <StatTile label="ROAS" value={fmtRatio(k.roas)} />
-        <StatTile label="ROI" value={k.roi === null ? "—" : fmtPct(k.roi, 0)} hint={k.roi === null ? "calculable avec dépenses + CA de tous les clients" : undefined} tone={k.roi !== null ? (k.roi < 0 ? "red" : "green") : undefined} />
+        <StatTile label="ROI" value={k.roi === null ? "—" : fmtPct(k.roi, 0)} hint={k.roi === null ? "calculable avec dépenses + CA de tous les clients" : "(CA − dépenses) ÷ dépenses : sur chiffre d'affaires, hors marge"} tone={k.roi !== null ? (k.roi < 0 ? "red" : "green") : undefined} />
         <StatTile label="Visites landing pages" value={fmtNum(a.pageviews)} />
       </section>
+
+      {!noData && <ScopeBreakdown attributed={a.attributed} unattributed={a.unattributed} total={a.totals} currency={cur} period={`du ${fmtDate(from)} au ${fmtDate(to)}`} />}
 
       {noData ? (
         <div className="mt-5">

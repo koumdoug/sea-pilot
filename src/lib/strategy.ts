@@ -1,6 +1,7 @@
 // Fiche stratégie d'acquisition — calculs déterministes à partir des objectifs saisis à l'onboarding.
 // Aucun benchmark externe n'est inventé : seuls les chiffres de l'utilisateur sont utilisés ; le reste est présenté comme hypothèse.
-import { fmt } from "./kpi";
+import { fmt, fmtPct } from "./kpi";
+import { isReliableMarginPct } from "./margin";
 
 export type StrategyInput = {
   companyName: string;
@@ -30,7 +31,10 @@ const nz = (n: number | null | undefined): n is number => typeof n === "number" 
 export function buildStrategy(i: StrategyInput, now = new Date()): StrategySheet {
   const g = i.goals;
   const price = i.offer?.price ?? null;
-  const margin = i.offer?.marginPct ?? null;
+  const rawMargin = i.offer?.marginPct ?? null;
+  // Marge ambiguë (0 < marge < 1 : probablement une fraction) ou invalide (> 100) : donnée insuffisante, aucune marge brute ni alerte de perte calculée dessus.
+  const margin = isReliableMarginPct(rawMargin) ? rawMargin : null;
+  const marginUnreliable = nz(rawMargin) && margin === null;
   const profitPerSale = nz(price) && nz(margin) ? (price * margin) / 100 : null;
   const requiredCloseRate = nz(g.leadsPerMonth) && nz(g.salesPerMonth) ? g.salesPerMonth / g.leadsPerMonth : null;
   const maxCpl = nz(g.maxCac) && requiredCloseRate ? g.maxCac * requiredCloseRate : null;
@@ -40,7 +44,7 @@ export function buildStrategy(i: StrategyInput, now = new Date()): StrategySheet
 
   const m = (k: string, v: boolean) => (v ? [] : [k]);
   const missing = [
-    ...m("prix de l'offre", nz(price)), ...m("marge approximative", nz(margin)), ...m("objectif de leads par mois", nz(g.leadsPerMonth)),
+    ...m("prix de l'offre", nz(price)), ...m(marginUnreliable ? "marge approximative (valeur ambiguë ou invalide : elle s'exprime en pourcentage entier, 28 pour 28 %)" : "marge approximative", nz(margin)), ...m("objectif de leads par mois", nz(g.leadsPerMonth)),
     ...m("objectif de ventes par mois", nz(g.salesPerMonth)), ...m("budget publicitaire mensuel", nz(g.adBudgetMonthly)), ...m("coût d'acquisition maximal", nz(g.maxCac)),
   ];
 
@@ -49,7 +53,7 @@ export function buildStrategy(i: StrategyInput, now = new Date()): StrategySheet
   if (nz(price)) e.push({ label: "Prix de l'offre", value: fmt(price, cur), kind: "input" });
   if (profitPerSale !== null) e.push({ label: "Marge brute par vente", value: fmt(profitPerSale, cur), kind: "calculated", note: "prix × marge approximative" });
   if (nz(g.maxCac)) e.push({ label: "CAC maximal", value: fmt(g.maxCac, cur), kind: "input" });
-  if (requiredCloseRate !== null) e.push({ label: "Taux lead → vente nécessaire", value: `${(requiredCloseRate * 100).toFixed(1)} %`, kind: "calculated", note: "ventes ÷ leads visés" });
+  if (requiredCloseRate !== null) e.push({ label: "Taux lead → vente nécessaire", value: fmtPct(requiredCloseRate), kind: "calculated", note: "ventes ÷ leads visés" });
   if (maxCpl !== null) e.push({ label: "Coût par lead maximal", value: fmt(maxCpl, cur), kind: "calculated", note: "CAC maximal × taux lead → vente" });
   if (leadsFromBudget !== null) e.push({ label: "Leads atteignables avec le budget", value: String(Math.floor(leadsFromBudget)), kind: "calculated", note: "budget ÷ coût par lead maximal" });
   if (salesNeededForRevenue !== null) e.push({ label: "Ventes nécessaires pour l'objectif de CA", value: String(salesNeededForRevenue), kind: "calculated", note: "objectif de CA ÷ prix" });

@@ -15,8 +15,14 @@ export type SeriesPoint = { date: string; spend: number; clicks: number; impress
 export type CampaignRow = { id: string; name: string; platform: string; status: string; totals: Totals; kpis: Kpis };
 
 export type AnalyticsResult = {
+  /** GLOBAL : toutes les données de la période, y compris celles qui ne sont rattachées à aucune campagne */
   totals: Totals;
   kpis: Kpis;
+  /** Données rattachées à une campagne SEA Pilot (total − non attribué) */
+  attributed: Totals;
+  attributedKpis: Kpis;
+  /** Dépenses et leads sans campagne (plateforme non liée, campagne supprimée, formulaire/API/saisie sans campagne) */
+  unattributed: Totals;
   series: SeriesPoint[];
   campaigns: CampaignRow[];
   sources: { source: string; leads: number; qualified: number; customers: number; revenue: number }[];
@@ -68,6 +74,7 @@ export async function loadAnalytics(workspaceId: string, f: AnalyticsFilters): P
   ]);
 
   const totals = emptyTotals();
+  const unattributed = emptyTotals();
   const byDay = new Map<string, SeriesPoint>();
   const point = (d: string): SeriesPoint => {
     let p = byDay.get(d);
@@ -82,6 +89,7 @@ export async function loadAnalytics(workspaceId: string, f: AnalyticsFilters): P
     totals.spend += m.spend; totals.impressions += m.impressions; totals.clicks += m.clicks;
     const p = point(dayKey(m.date)); p.spend += m.spend; p.clicks += m.clicks; p.impressions += m.impressions;
     if (m.campaignId) { const c = cTotals(m.campaignId); c.spend += m.spend; c.impressions += m.impressions; c.clicks += m.clicks; }
+    else { unattributed.spend += m.spend; unattributed.impressions += m.impressions; unattributed.clicks += m.clicks; }
   }
   for (const l of leads) {
     const isQ = QUALIFIED.includes(l.status) || !!l.qualifiedAt;
@@ -92,6 +100,10 @@ export async function loadAnalytics(workspaceId: string, f: AnalyticsFilters): P
     if (l.campaignId) {
       const c = cTotals(l.campaignId); c.leads++; if (isQ) c.qualifiedLeads++;
       if (won) { c.customers++; c.revenue += l.value ?? 0; if (l.value && l.value > 0) c.customersWithRevenue = (c.customersWithRevenue ?? 0) + 1; }
+    }
+    if (!l.campaignId) {
+      unattributed.leads++; if (isQ) unattributed.qualifiedLeads++;
+      if (won) { unattributed.customers++; unattributed.revenue += l.value ?? 0; if (l.value && l.value > 0) unattributed.customersWithRevenue = (unattributed.customersWithRevenue ?? 0) + 1; }
     }
     const s = bySource.get(l.utmSource ?? "(direct / inconnu)") ?? { source: l.utmSource ?? "(direct / inconnu)", leads: 0, qualified: 0, customers: 0, revenue: 0 };
     s.leads++; if (isQ) s.qualified++; if (won) { s.customers++; s.revenue += l.value ?? 0; }
@@ -114,8 +126,15 @@ export async function loadAnalytics(workspaceId: string, f: AnalyticsFilters): P
   const hasSpendData = metrics.length > 0 && totals.spend > 0;
   if (!hasSpendData && !f.source) notes.push("Aucune dépense publicitaire enregistrée sur la période : CPL, CAC, ROAS et ROI ne peuvent pas être calculés. Saisissez vos dépenses ou connectez une plateforme publicitaire.");
 
+  // Périmètre attribué = global − non attribué (les deux partagent exactement la même période et les mêmes filtres)
+  const attributed: Totals = {
+    spend: totals.spend - unattributed.spend, impressions: totals.impressions - unattributed.impressions, clicks: totals.clicks - unattributed.clicks, leads: totals.leads - unattributed.leads,
+    qualifiedLeads: totals.qualifiedLeads - unattributed.qualifiedLeads, customers: totals.customers - unattributed.customers, revenue: totals.revenue - unattributed.revenue,
+    customersWithRevenue: (totals.customersWithRevenue ?? 0) - (unattributed.customersWithRevenue ?? 0),
+  };
+
   return {
-    totals, kpis: computeKpis(totals), series, campaigns, sources: [...bySource.values()].sort((a, b) => b.leads - a.leads),
+    totals, kpis: computeKpis(totals), attributed, attributedKpis: computeKpis(attributed), unattributed, series, campaigns, sources: [...bySource.values()].sort((a, b) => b.leads - a.leads),
     pageviews, hasSpendData, notes, periodDays,
   };
 }

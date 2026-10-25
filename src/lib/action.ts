@@ -4,6 +4,7 @@ import { requireCtx, type Ctx } from "./tenant";
 import { PermissionError, type Action } from "./permissions";
 import { log, errMsg } from "./logger";
 import { AIError, aiUserMessage } from "./ai/errors";
+import { parseDecimalInput } from "./number-input";
 
 export type ActionState = {
   ok?: boolean;
@@ -12,6 +13,8 @@ export type ActionState = {
   fieldErrors?: Record<string, string>;
   id?: string;
   data?: unknown;
+  /** Valeurs soumises, renvoyées après un REJET par les seules actions qui le demandent (voir submittedValues) : les champs de formulaire les réaffichent. */
+  values?: Record<string, string>;
 };
 
 export class UserError extends Error {}
@@ -27,6 +30,15 @@ export function formObject(fd: FormData): Record<string, string | string[]> {
   }
   return out;
 }
+
+/** Valeurs textuelles soumises, pour les réafficher après un rejet : ni fichiers, ni champs internes (`$ACTION…`), ni champ sensible (mot de passe, jeton). */
+export function submittedValues(fd: FormData): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of fd.entries()) if (typeof v === "string" && !k.startsWith("$") && !/password|token|secret/i.test(k)) out[k] = v;
+  return out;
+}
+/** Ajoute les valeurs soumises à un état d'échec ; un succès est renvoyé tel quel. */
+export const withSubmittedValues = (r: ActionState, fd: FormData): ActionState => (r.ok ? r : { ...r, values: submittedValues(fd) });
 
 export class ValidationError extends Error {
   constructor(public fieldErrors: Record<string, string>) {
@@ -68,8 +80,13 @@ export async function run(opts: RunOpts, fn: (ctx: Ctx) => Promise<ActionState |
 }
 
 export const optStr = (max = 500) => z.string().trim().max(max).optional().transform((v) => (v ? v : undefined));
+/** Nombre optionnel : grammaire décimale partagée avec le navigateur (src/lib/number-input.ts) ; vide ou espaces = absent (jamais zéro) ; les négatifs restent refusés par chaque champ. */
 export const optNum = z
   .union([z.string(), z.number()])
   .optional()
-  .transform((v) => (v === undefined || v === "" ? undefined : Number(v)))
-  .refine((v) => v === undefined || (Number.isFinite(v) && v >= 0), "Nombre invalide");
+  .transform((v, ctx) => {
+    const r = parseDecimalInput(v);
+    if (!r.ok) { ctx.addIssue({ code: "custom", message: r.message }); return z.NEVER; }
+    return r.value;
+  })
+  .refine((v) => v === undefined || v >= 0, "Nombre invalide");

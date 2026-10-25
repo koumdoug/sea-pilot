@@ -9,6 +9,7 @@ import { fmtMoney, fmtNum, fmtPct, fmtRatio } from "@/lib/kpi";
 import { Alert, Card, EmptyState, PageHeader, Section, StatTile, TableWrap, Td, Th, fmtDate } from "@/components/ui";
 import { BarList, Funnel, LineChart } from "@/components/charts";
 import { RecommendationList } from "@/components/recommendation-list";
+import { ScopeBreakdown } from "@/components/scope-breakdown";
 import { ActionForm, SubmitButton, TextAreaField } from "@/components/forms";
 import { importCsvAction } from "./actions";
 
@@ -68,6 +69,8 @@ export default async function AnalyticsPage({ searchParams }: { searchParams: Pr
         <StatTile label="CTR" value={fmtPct(k.ctr, 2)} /><StatTile label="CPC" value={fmtMoney(k.cpc, cur)} /><StatTile label="CPL" value={fmtMoney(k.cpl, cur)} />
         <StatTile label="CVR (clic → lead)" value={fmtPct(k.cvr)} /><StatTile label="CAC" value={fmtMoney(k.cac, cur)} /><StatTile label="ROAS" value={fmtRatio(k.roas)} />
       </section>
+
+      {!empty && <ScopeBreakdown attributed={a.attributed} unattributed={a.unattributed} total={a.totals} currency={cur} period={`du ${fmtDate(from)} au ${fmtDate(to)}`} />}
 
       {empty ? <div className="mt-5"><EmptyState title="Aucune donnée pour ces filtres">Élargissez la période, retirez des filtres, ou enregistrez vos premières dépenses et leads.</EmptyState></div> : (
         <div className="mt-5 grid gap-5 lg:grid-cols-2">

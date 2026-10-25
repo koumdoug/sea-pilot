@@ -7,8 +7,9 @@ import { Alert, Badge, Card, StatTile, TableWrap, Td, Th } from "@/components/ui
 import { Funnel, LineChart } from "@/components/charts";
 import { RecommendationList } from "@/components/recommendation-list";
 import { LevelBadge } from "@/components/lead-badges";
+import { ScopeBreakdown } from "@/components/scope-breakdown";
 
-export const metadata: Metadata = { title: "Démo", description: "Explorez SEA Pilot avec un jeu de données fictif : dashboard, campagnes, lead, qualification IA et analytics.", alternates: { canonical: "/demo" } };
+export const metadata: Metadata = { title: "Démo", description: "Explorez SEA Pilot avec un jeu de données fictif : dashboard, campagnes, lead, qualification automatique et analytics.", alternates: { canonical: "/demo" } };
 
 const HEALTH = { good: ["🟢", "Bon"], watch: ["🟠", "À surveiller"], bad: ["🔴", "Problème"], unknown: ["⚪", "Données insuffisantes"] } as const;
 const BASIS = { fact: ["green", "Fait fourni"], inference: ["purple", "Inférence"], missing: ["gray", "Manquant"] } as const;
@@ -22,7 +23,7 @@ export default function DemoPage() {
     <div className="mx-auto max-w-6xl px-4 py-8">
       <Alert tone="warning" title="Données de démonstration">Tout ce qui suit est <strong>fictif</strong> ({DEMO_COMPANY}). Aucune de ces données ne provient d'une vraie campagne. Les calculs, eux, utilisent les vrais moteurs de SEA Pilot.</Alert>
       <h1 className="mt-6 text-3xl font-extrabold tracking-tight">Démo de SEA Pilot</h1>
-      <p className="mt-1 text-slate-700">Dashboard, campagnes, lead, qualification IA et analytics sur 30 jours.</p>
+      <p className="mt-1 text-slate-700">Dashboard, campagnes, lead, qualification automatique et analytics sur 30 jours.</p>
 
       <section aria-labelledby="d-dash" className="mt-8"><h2 id="d-dash" className="text-xl font-bold">1. Dashboard <Badge tone="purple">Démo</Badge></h2>
         <Card className="mt-3"><p className="text-lg font-semibold">{dot} Santé de l'acquisition : {hl}</p><ul className="mt-1 list-disc pl-5 text-sm text-slate-700">{d.health.reasons.map((r) => <li key={r}>{r}</li>)}</ul></Card>
@@ -31,6 +32,8 @@ export default function DemoPage() {
           <StatTile label="Leads" value={fmtNum(k.leads)} /><StatTile label="CPL" value={fmtMoney(k.cpl)} /><StatTile label="Conversion" value={fmtPct(k.cvr)} /><StatTile label="Qualifiés" value={fmtNum(k.qualifiedLeads)} /><StatTile label="Clients" value={fmtNum(k.customers)} />
           <StatTile label="CAC" value={fmtMoney(k.cac)} hint="max visé : 130 €" /><StatTile label="CA attribué" value={fmtMoney(k.revenue)} /><StatTile label="ROAS" value={fmtRatio(k.roas)} /><StatTile label="ROI" value={fmtPct(k.roi, 0)} />
         </div>
+        <ScopeBreakdown attributed={d.attributed} unattributed={d.unattributed} total={d.totals} currency="EUR" period="30 jours (démo)" />
+        <Card className="mt-4"><h3 className="text-sm font-semibold">Lecture des chiffres (démo fictive)</h3><ul className="mt-1 list-disc space-y-1 pl-5 text-xs text-slate-600">{d.notes.map((n) => <li key={n}>{n}</li>)}</ul></Card>
         <div className="mt-4 grid gap-4 lg:grid-cols-2">
           <Card><LineChart integer format={(n) => String(Math.round(n))} title="Leads par jour (démo)" labels={d.series.map((p) => p.date)} series={[{ name: "Leads", values: d.series.map((p) => p.leads) }]} /></Card>
           <Card><h3 className="mb-3 text-sm font-semibold">Entonnoir (démo)</h3><Funnel steps={[{ label: "Impressions", value: k.impressions }, { label: "Clics", value: k.clicks }, { label: "Leads", value: k.leads }, { label: "Qualifiés", value: k.qualifiedLeads }, { label: "Clients", value: k.customers }]} /></Card>
@@ -42,7 +45,7 @@ export default function DemoPage() {
           <tbody>{d.campaigns.map((c) => <tr key={c.id}><Td>{c.name}</Td><Td>{PLATFORM_LABEL[c.platform]}</Td><Td className="text-right tabular-nums">{fmtMoney(c.totals.spend)}</Td><Td className="text-right tabular-nums">{c.totals.leads}</Td><Td className="text-right tabular-nums">{fmtMoney(c.kpis.cpl)}</Td><Td className="text-right tabular-nums">{c.totals.customers}</Td><Td className="text-right tabular-nums">{fmtRatio(c.kpis.roas)}</Td></tr>)}</tbody></TableWrap></div>
       </section>
 
-      <section aria-labelledby="d-lead" className="mt-10"><h2 id="d-lead" className="text-xl font-bold">3. Lead et qualification IA <Badge tone="purple">Démo</Badge></h2>
+      <section aria-labelledby="d-lead" className="mt-10"><h2 id="d-lead" className="text-xl font-bold">3. Lead et qualification automatique <Badge tone="purple">Démo</Badge></h2>
         <Card className="mt-3">
           <p className="font-semibold">{d.lead.name}</p><p className="mt-1 whitespace-pre-line rounded bg-slate-50 p-3 text-sm">{d.lead.message}</p>
           <div className="mt-3 flex flex-wrap items-center gap-3"><span className="text-3xl font-extrabold">{q.score}<span className="text-base font-medium text-slate-500">/100</span></span><LevelBadge level={q.level} /></div>

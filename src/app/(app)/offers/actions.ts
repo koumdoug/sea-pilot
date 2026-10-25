@@ -6,7 +6,7 @@ import { z } from "zod";
 import type { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { audit } from "@/lib/audit";
-import { run, parse, formObject, optNum, optStr, UserError, type ActionState } from "@/lib/action";
+import { run, parse, formObject, optNum, optStr, UserError, withSubmittedValues, type ActionState } from "@/lib/action";
 import { generate } from "@/lib/ai/service";
 import { baseSystem, offerPrompt, offerSchema } from "@/lib/ai/prompts";
 import { briefOf } from "@/lib/ai/brief";
@@ -16,6 +16,7 @@ import { DEFAULT_CONSENT, DEFAULT_FORM_FIELDS } from "@/lib/landing";
 import { limitReached } from "@/lib/plans";
 import { CURRENCIES } from "@/lib/constants";
 import { workspaceUsage } from "@/lib/billing";
+import { marginInputError } from "@/lib/margin";
 
 const offerSchemaIn = z.object({
   id: z.string().optional(),
@@ -24,6 +25,7 @@ const offerSchemaIn = z.object({
   problem: optStr(1000),
   price: optNum,
   marginPct: optNum.refine((v) => v === undefined || v <= 100, "Entre 0 et 100"),
+  marginPctConfirm: optStr(10),
   currency: z.enum(CURRENCIES).default("EUR"),
   geoZone: optStr(200),
   advantages: z.string().trim().max(2000).optional(),
@@ -36,6 +38,16 @@ export async function saveOfferAction(_: ActionState, fd: FormData): Promise<Act
   let newId: string | undefined;
   const r = await run({ action: "write" }, async (ctx) => {
     const d = parse(offerSchemaIn, formObject(fd));
+    let storedMargin: number | null | undefined;
+    if (d.id) {
+      const existing = await db.offer.findFirst({ where: { id: d.id, workspaceId: ctx.workspaceId }, select: { marginPct: true } });
+      if (!existing) throw new UserError("Offre introuvable.");
+      storedMargin = existing.marginPct;
+    }
+    // La confirmation d'une marge ambiguë n'est pas redemandée si la valeur soumise est identique à la valeur ENREGISTRÉE ; toute autre valeur ambiguë l'exige.
+    const unchangedMargin = d.marginPct !== undefined && storedMargin === d.marginPct;
+    const marginError = marginInputError(d.marginPct, d.marginPctConfirm === "on" || unchangedMargin);
+    if (marginError) throw new UserError(marginError);
     if (d.audienceId && !(await db.audience.findFirst({ where: { id: d.audienceId, workspaceId: ctx.workspaceId }, select: { id: true } }))) throw new UserError("Audience introuvable.");
     if (d.productId && !(await db.product.findFirst({ where: { id: d.productId, workspaceId: ctx.workspaceId, deletedAt: null }, select: { id: true } }))) throw new UserError("Produit introuvable.");
     const data = {
@@ -55,7 +67,7 @@ export async function saveOfferAction(_: ActionState, fd: FormData): Promise<Act
     return { ok: true, id: o.id };
   });
   if (r.ok && newId) redirect(`/offers/${newId}`);
-  return r;
+  return withSubmittedValues(r, fd); // après un rejet, les saisies reviennent dans l'état (le formulaire les réaffiche)
 }
 
 export async function setOfferStatusAction(_: ActionState, fd: FormData): Promise<ActionState> {

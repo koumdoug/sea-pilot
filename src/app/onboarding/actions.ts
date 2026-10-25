@@ -4,11 +4,12 @@ import { redirect } from "next/navigation";
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { audit } from "@/lib/audit";
-import { run, parse, formObject, optNum, optStr, type ActionState, UserError } from "@/lib/action";
+import { run, parse, formObject, optNum, optStr, type ActionState, UserError, withSubmittedValues } from "@/lib/action";
 import { buildStrategy } from "@/lib/strategy";
 import { generateStrategyNarrative } from "@/lib/strategy-service";
 import { COMPANY_SIZES, CURRENCIES, LANGUAGES } from "@/lib/constants";
 import { createWorkspace } from "@/lib/workspaces";
+import { marginInputError } from "@/lib/margin";
 import { requireUser } from "@/lib/auth";
 import { cookies } from "next/headers";
 import { WORKSPACE_COOKIE } from "@/lib/constants";
@@ -29,6 +30,7 @@ const schema = z.object({
   offerName: z.string().trim().min(2, "Produit / service requis").max(160),
   price: optNum,
   marginPct: optNum.refine((v) => v === undefined || v <= 100, "Entre 0 et 100"),
+  marginPctConfirm: optStr(10),
   geoZone: optStr(200),
   advantages: z.string().trim().max(1500).optional(),
   differentiation: optStr(600),
@@ -50,6 +52,8 @@ const schema = z.object({
 export async function completeOnboardingAction(_: ActionState, fd: FormData): Promise<ActionState> {
   const r = await run({ allowIncompleteOnboarding: true, allowInactive: true, action: "manage_settings" }, async (ctx) => {
     const d = parse(schema, formObject(fd));
+    const marginError = marginInputError(d.marginPct, d.marginPctConfirm === "on");
+    if (marginError) throw new UserError(marginError);
     const advantages = (d.advantages ?? "").split(/\r?\n|;/).map((s) => s.trim()).filter(Boolean).slice(0, 12);
     const goals = { leadsPerMonth: d.goalLeadsPerMonth, salesPerMonth: d.goalSalesPerMonth, adBudgetMonthly: d.adBudgetMonthly, maxCac: d.maxCac, revenueGoal: d.revenueGoal };
     if (goals.leadsPerMonth && goals.salesPerMonth && goals.salesPerMonth > goals.leadsPerMonth) throw new UserError("L'objectif de ventes ne peut pas dépasser l'objectif de leads.");
@@ -83,7 +87,7 @@ export async function completeOnboardingAction(_: ActionState, fd: FormData): Pr
     return { ok: true };
   });
   if (r.ok) redirect("/strategy?welcome=1");
-  return r;
+  return withSubmittedValues(r, fd); // après un rejet, les saisies reviennent dans l'état (l'assistant les réaffiche)
 }
 
 export async function createFirstWorkspaceAction(_: ActionState, fd: FormData): Promise<ActionState> {

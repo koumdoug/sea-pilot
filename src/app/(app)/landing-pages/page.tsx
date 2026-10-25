@@ -4,6 +4,7 @@ import { db } from "@/lib/db";
 import { env } from "@/lib/env";
 import { requireCtx } from "@/lib/tenant";
 import { pageUrl } from "@/lib/landing";
+import { fmtPct } from "@/lib/kpi";
 import { Badge, Card, EmptyState, PageHeader, Section, fmtDate, type Tone } from "@/components/ui";
 import { ActionForm, InlineAction, SelectField, SubmitButton, TextField } from "@/components/forms";
 import { createPageAction, duplicatePageAction, publishPageAction } from "./actions";
@@ -43,7 +44,7 @@ export default async function LandingPages({ searchParams }: { searchParams: Pro
               <li key={p.id}><Card className="h-full">
                 <div className="flex items-start justify-between gap-2"><Link href={`/landing-pages/${p.id}`} className="min-w-0 break-words font-semibold text-brand-700 underline">{p.name}</Link><Badge tone={TONE[p.status]}>{LABEL[p.status]}</Badge></div>
                 <p className="mt-1 break-all text-xs text-slate-500">{pageUrl(env.appUrl, ctx.workspace.slug, p.slug)}</p>
-                <p className="mt-2 text-sm text-slate-700">{v} visite(s) · {l} lead(s){v > 0 ? ` · conversion ${((l / v) * 100).toFixed(1)} %` : ""}</p>
+                <p className="mt-2 text-sm text-slate-700">{v} visite(s) · {l} lead(s){v > 0 ? ` · conversion ${fmtPct(l / v)}` : ""}</p>
                 <p className="text-xs text-slate-500">Modifiée le {fmtDate(p.updatedAt)}</p>
                 {ctx.can("write") && <div className="mt-3 flex flex-wrap gap-2">
                   {p.status === "published" && <InlineAction action={publishPageAction} hidden={{ id: p.id, to: "draft" }}>Dépublier</InlineAction>}

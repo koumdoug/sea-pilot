@@ -22,12 +22,17 @@ export async function loadInsights(workspaceId: string, f: AnalyticsFilters, cur
     views: views.find((v) => v.landingPageId === p.id)?._count._all ?? 0,
     leads: leadsBy.find((v) => v.landingPageId === p.id)?._count._all ?? 0,
   }));
+  // Marge de l'offre de chaque campagne (en % du prix) : nécessaire au seuil de scaling ; absente → aucune rentabilité supposée
+  const campaignIds = current.campaigns.map((c) => c.id);
+  const offerMargins = campaignIds.length ? await db.campaign.findMany({ where: { workspaceId, id: { in: campaignIds } }, select: { id: true, offer: { select: { marginPct: true } } } }) : [];
+  const marginOf = new Map(offerMargins.map((c) => [c.id, c.offer?.marginPct ?? null]));
   const staleNewLeads = await db.lead.count({ where: { workspaceId, deletedAt: null, status: "new", createdAt: { lt: new Date(Date.now() - 48 * 3_600_000) } } });
 
   const recommendations: Recommendation[] = buildRecommendations({
     overall: current.kpis,
+    attributed: current.attributedKpis,
     previous: prev.totals.leads || prev.totals.spend ? prev.kpis : null,
-    campaigns: current.campaigns.map((c) => ({ id: c.id, name: c.name, status: c.status, kpis: c.kpis })),
+    campaigns: current.campaigns.map((c) => ({ id: c.id, name: c.name, status: c.status, kpis: c.kpis, marginPct: marginOf.get(c.id) ?? null })),
     pages, goals, staleNewLeads, currency: ws?.currency ?? currency, periodDays: current.periodDays,
   });
   return { analytics: current, previous: prev, health, recommendations, goals, pages, staleNewLeads };

@@ -89,20 +89,20 @@ export function acquisitionHealth(k: Kpis, goals: Goals, periodDays: number): He
     else good.push(`Coût d'acquisition client (${fmt(k.cac)}) sous le maximum visé (${fmt(goals.maxCac)}).`);
   }
   if (k.roiReliable && k.roas !== null) {
-    if (k.roas < 1) bad.push(`ROAS de ${k.roas.toFixed(2)} : chaque unité dépensée rapporte moins qu'elle ne coûte.`);
-    else if (k.roas < 2) watch.push(`ROAS de ${k.roas.toFixed(2)} : rentabilité fragile.`);
-    else good.push(`ROAS de ${k.roas.toFixed(2)}.`);
+    if (k.roas < 1) bad.push(`ROAS de ${fmtRatio(k.roas)} (sur chiffre d'affaires) : chaque unité dépensée rapporte moins de chiffre d'affaires qu'elle ne coûte.`);
+    else if (k.roas < 2) watch.push(`ROAS de ${fmtRatio(k.roas)} (sur chiffre d'affaires) : rentabilité fragile.`);
+    else good.push(`ROAS de ${fmtRatio(k.roas)} (sur chiffre d'affaires, marge non prise en compte).`);
   }
   if (goals.goalLeadsPerMonth && periodDays > 0) {
     const target = (goals.goalLeadsPerMonth * periodDays) / 30;
     if (target >= 1) {
       const pace = k.leads / target;
-      if (pace < 0.5) bad.push(`${k.leads} lead(s) sur ${target.toFixed(0)} attendus pour la période (${Math.round(pace * 100)} % de l'objectif).`);
-      else if (pace < 0.8) watch.push(`${k.leads} lead(s) sur ${target.toFixed(0)} attendus (${Math.round(pace * 100)} % de l'objectif).`);
-      else good.push(`Objectif de leads tenu (${k.leads} pour ${target.toFixed(0)} attendus).`);
+      if (pace < 0.5) bad.push(`${k.leads} lead(s) sur ${fmtNum(target)} attendus pour la période (${Math.round(pace * 100)} % de l'objectif).`);
+      else if (pace < 0.8) watch.push(`${k.leads} lead(s) sur ${fmtNum(target)} attendus (${Math.round(pace * 100)} % de l'objectif).`);
+      else good.push(`Objectif de leads tenu (${k.leads} pour ${fmtNum(target)} attendus).`);
     }
   }
-  if (k.ctr !== null && k.impressions >= 1000 && k.ctr < 0.005) watch.push(`CTR faible (${(k.ctr * 100).toFixed(2)} %) : les annonces attirent peu de clics.`);
+  if (k.ctr !== null && k.impressions >= 1000 && k.ctr < 0.005) watch.push(`CTR faible (${fmtPct(k.ctr, 2)}) : les annonces attirent peu de clics.`);
   if (goals.adBudgetMonthly && periodDays > 0 && k.spend > (goals.adBudgetMonthly * periodDays) / 30 * 1.2) watch.push("La dépense dépasse de plus de 20 % le budget mensuel proratisé.");
 
   if (bad.length) return { status: "bad", reasons: [...bad, ...watch] };
@@ -115,6 +115,8 @@ export function fmt(n: number, currency = "EUR"): string {
   return new Intl.NumberFormat("fr-FR", { style: "currency", currency, maximumFractionDigits: n >= 100 ? 0 : 2 }).format(n);
 }
 export const fmtNum = (n: number) => new Intl.NumberFormat("fr-FR").format(Math.round(n));
-export const fmtPct = (n: number | null, digits = 1) => (n === null ? "—" : `${(n * 100).toFixed(digits)} %`);
+/** Nombre à la française (virgule décimale, espace pour les milliers) avec un nombre fixe de décimales. */
+export const fmtDec = (n: number, digits = 1) => new Intl.NumberFormat("fr-FR", { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(n);
+export const fmtPct = (n: number | null, digits = 1) => (n === null ? "—" : `${fmtDec(n * 100, digits)} %`);
 export const fmtMoney = (n: number | null, currency = "EUR") => (n === null ? "—" : fmt(n, currency));
-export const fmtRatio = (n: number | null) => (n === null ? "—" : n.toFixed(2));
+export const fmtRatio = (n: number | null) => (n === null ? "—" : fmtDec(n, 2));

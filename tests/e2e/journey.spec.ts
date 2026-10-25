@@ -249,7 +249,7 @@ test.describe.serial("parcours client SEA Pilot", () => {
     const tile = (label: string) => page.locator("div", { has: page.locator(`p:text-is("${label}")`) }).filter({ has: page.locator("p.text-2xl") }).last();
     await expect(tile("CPL")).toContainText(/300/); // 300 € / 1 lead
     await expect(tile("CAC")).toContainText(/300/);
-    await expect(tile("ROAS")).toContainText("18.00"); // 5400 / 300
+    await expect(tile("ROAS")).toContainText("18,00"); // 5400 / 300, virgule décimale française
     await expect(tile("ROI")).toContainText(/1\s?700/); // (5400-300)/300 = 1700 %
     await expect(page.getByRole("heading", { name: "Recommandations" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Détail par campagne" })).toBeVisible();

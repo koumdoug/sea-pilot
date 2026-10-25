@@ -35,7 +35,7 @@ export async function askCopilot(p: { workspace: Workspace; userId: string; ques
   const data = await buildCopilotContext(p.workspace.id);
   const r = await generate({
     workspaceId: p.workspace.id, userId: p.userId, kind: "copilot", temperature: 0.3,
-    system: baseSystem(briefOf(p.workspace), "copilote d'acquisition : analyste data rigoureux") + "\nTu ne cites que des chiffres présents dans les données fournies. Si une valeur est null ou absente, tu l'indiques comme donnée manquante.",
+    system: baseSystem(briefOf(p.workspace), "copilote d'acquisition : analyste data rigoureux") + "\nTu ne cites que des chiffres présents dans les données fournies. Ne recommande jamais d'augmenter le budget publicitaire, même si un ROAS ou un chiffre d'affaires paraît élevé. Respecte les signaux et les limites du moteur de recommandations (priorités, « scaling non recommandé », « sous le point mort », échantillons insuffisants). Indique clairement l'incertitude lorsque les données sont insuffisantes ou que la rentabilité n'est pas évaluée (marge absente ou ambiguë). Si une valeur est null ou absente, tu l'indiques comme donnée manquante.",
     prompt: copilotPrompt(p.question, data), schema: copilotSchema, input: { question: p.question },
   });
   return { answer: r.data, context: data, generationId: r.generationId };

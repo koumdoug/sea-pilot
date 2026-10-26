@@ -1,5 +1,5 @@
 import { computeKpis, fmtMoney, fmtNum, fmtRatio, type Totals } from "@/lib/kpi";
-import { Card, TableWrap, Td, Th } from "./ui";
+import { Card, RowTh, TableWrap, Td, Th } from "./ui";
 
 /**
  * Périmètres des indicateurs : GLOBAL = attribué aux campagnes + non attribué (même période, mêmes filtres).
@@ -14,7 +14,7 @@ export function ScopeBreakdown({ attributed, unattributed, total, currency, peri
   const kt = computeKpis(total);
   const row = (label: string, t: Totals, k: ReturnType<typeof computeKpis> | null, strong = false) => (
     <tr className={strong ? "font-semibold" : undefined}>
-      <Td>{label}</Td>
+      <RowTh strong={strong}>{label}</RowTh>
       <Td className="text-right tabular-nums">{t.spend > 0 ? fmtMoney(t.spend, currency) : "—"}</Td>
       <Td className="text-right tabular-nums">{fmtNum(t.clicks)}</Td>
       <Td className="text-right tabular-nums">{fmtNum(t.leads)}</Td>

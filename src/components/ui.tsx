@@ -106,6 +106,11 @@ export function TableWrap({ children, caption }: { children: ReactNode; caption?
 }
 export const Th = ({ children, className }: { children?: ReactNode; className?: string }) => <th scope="col" className={cx("whitespace-nowrap border-b border-slate-200 bg-slate-50 px-3 py-2.5 text-xs font-semibold uppercase tracking-wide text-slate-500", className)}>{children}</th>;
 export const Td = ({ children, className }: { children?: ReactNode; className?: string }) => <td className={cx("border-b border-slate-100 px-3 py-2.5 align-top", className)}>{children}</td>;
+/**
+ * En-tête de LIGNE (`<th scope="row">`) : libellé de la ligne d'un tableau à deux entrées. Même apparence qu'une cellule `Td` (bordure, remplissage, alignement haut,
+ * texte à gauche). Le navigateur met `<th>` en gras par défaut : le poids est donc explicite (normal, ou gras quand la ligne l'est : `strong`).
+ */
+export const RowTh = ({ children, className, strong = false }: { children?: ReactNode; className?: string; strong?: boolean }) => <th scope="row" className={cx("border-b border-slate-100 px-3 py-2.5 text-left align-top", strong ? "font-semibold" : "font-normal", className)}>{children}</th>;
 
 export function Pagination({ page, pages, hrefFor }: { page: number; pages: number; hrefFor: (p: number) => string }) {
   if (pages <= 1) return null;

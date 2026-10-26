@@ -30,7 +30,7 @@ export const PLANS: Record<PlanId, Plan> = {
   growth: {
     id: "growth",
     name: "Growth",
-    tagline: "Pour les entreprises qui veulent automatiser leur acquisition.",
+    tagline: "Pour les équipes qui veulent automatiser leurs relances et suivre leurs campagnes.",
     limits: { members: 5, activeCampaigns: 15, landingPages: 15, leadsPerMonth: 2000, aiGenerationsPerDay: 150, sequences: 10, integrations: 5, apiKeys: 5 },
     features: ["5 utilisateurs", "15 campagnes actives", "15 landing pages", "2 000 leads / mois", "Séquences de relance", "Toutes les intégrations"],
   },

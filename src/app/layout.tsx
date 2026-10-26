@@ -4,8 +4,8 @@ import { env } from "@/lib/env";
 
 export const metadata: Metadata = {
   metadataBase: new URL(env.appUrl),
-  title: { default: "SEA Pilot — L'acquisition client automatisée par l'IA", template: "%s · SEA Pilot" },
-  description: "SEA Pilot transforme votre entreprise, votre offre et vos objectifs en un système d'acquisition mesurable : recherche, stratégie, campagnes, landing pages, leads, qualification IA, relances et analytics.",
+  title: { default: "SEA Pilot — Pilotez votre acquisition client avec des assistants IA", template: "%s · SEA Pilot" },
+  description: "SEA Pilot transforme votre entreprise, votre offre et vos objectifs en un système d'acquisition mesurable : recherche, stratégie, campagnes, landing pages, leads (qualification par règles, avec enrichissement IA optionnel), relances et analytics.",
   openGraph: { type: "website", siteName: "SEA Pilot", locale: "fr_FR" },
   robots: { index: true, follow: true },
 };

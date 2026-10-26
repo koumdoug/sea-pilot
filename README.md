@@ -1,7 +1,7 @@
 # SEA Pilot
 
-SaaS d'acquisition et d'automatisation marketing piloté par l'IA :
-**Recherche → Stratégie → Offre → Campagne → Landing page → Lead → Qualification IA → Relance → Conversion → Analyse → Optimisation.**
+SaaS d'acquisition et d'automatisation marketing, avec qualification par règles et assistants IA optionnels :
+**Recherche → Stratégie → Offre → Campagne → Landing page → Lead → Qualification par règles, avec enrichissement IA optionnel → Relance → Conversion → Analyse → Optimisation.**
 
 Principe directeur : *aucune fausse fonctionnalité*. Une intégration non configurée affiche « Configuration requise » ; un indicateur non calculable affiche « — » ; un contenu généré par l'IA est étiqueté comme tel ; aucun e-mail n'est envoyé sans configuration **et** consentement.
 

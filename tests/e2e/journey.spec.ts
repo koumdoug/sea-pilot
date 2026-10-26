@@ -34,7 +34,7 @@ test.afterAll(async () => { await page.context().close(); await db.$disconnect()
 test.describe.serial("parcours client SEA Pilot", () => {
   test("pages publiques : accueil, démo, légales, SEO", async () => {
     await page.goto("/");
-    await expect(page.getByRole("heading", { level: 1 })).toContainText("Transformez votre acquisition en système automatisé");
+    await expect(page.getByRole("heading", { level: 1 })).toContainText("Transformez votre acquisition en système mesuré et outillé");
     await expect(page.getByRole("link", { name: "Commencer gratuitement" }).first()).toBeVisible();
     await expect(page).toHaveTitle(/SEA Pilot/);
     await expect(page.locator('meta[name="description"]')).toHaveAttribute("content", /SEA Pilot/);

@@ -19,27 +19,36 @@ export type Plan = { id: PlanId; name: string; tagline: string; limits: PlanLimi
 
 export const UNLIMITED = -1;
 
+/** Libellés français des limites (écran de facturation et messages de rétrogradation : jamais de clé technique). */
+export const LIMIT_LABEL: Record<keyof PlanLimits, string> = {
+  members: "Utilisateurs", activeCampaigns: "Campagnes actives", landingPages: "Landing pages", leadsPerMonth: "Leads ce mois-ci (seuil indicatif)",
+  aiGenerationsPerDay: "Générations IA / jour", sequences: "Séquences de relance", integrations: "Intégrations", apiKeys: "Clés API",
+};
+
+/** Limites seulement informatives : affichées avec l'usage, mais jamais bloquantes (ni à la création, ni pour un changement de forfait). */
+export const INFORMATIVE_LIMITS: readonly (keyof PlanLimits)[] = ["leadsPerMonth"];
+
 export const PLANS: Record<PlanId, Plan> = {
   starter: {
     id: "starter",
     name: "Starter",
     tagline: "Pour la petite entreprise qui démarre son acquisition.",
     limits: { members: 1, activeCampaigns: 3, landingPages: 3, leadsPerMonth: 300, aiGenerationsPerDay: 30, sequences: 1, integrations: 2, apiKeys: 1 },
-    features: ["1 utilisateur", "3 campagnes actives", "3 landing pages", "300 leads / mois", "Qualification des leads", "Analytics et recommandations"],
+    features: ["1 utilisateur", "3 campagnes actives", "3 landing pages", "300 leads / mois (seuil indicatif)", "Qualification des leads", "Analytics et recommandations"],
   },
   growth: {
     id: "growth",
     name: "Growth",
     tagline: "Pour les équipes qui veulent automatiser leurs relances et suivre leurs campagnes.",
     limits: { members: 5, activeCampaigns: 15, landingPages: 15, leadsPerMonth: 2000, aiGenerationsPerDay: 150, sequences: 10, integrations: 5, apiKeys: 5 },
-    features: ["5 utilisateurs", "15 campagnes actives", "15 landing pages", "2 000 leads / mois", "Séquences de relance", "Toutes les intégrations"],
+    features: ["5 utilisateurs", "15 campagnes actives", "15 landing pages", "2 000 leads / mois (seuil indicatif)", "Séquences de relance", "Toutes les intégrations"],
   },
   pro: {
     id: "pro",
     name: "Pro",
     tagline: "Pour les agences et les équipes.",
     limits: { members: 25, activeCampaigns: UNLIMITED, landingPages: UNLIMITED, leadsPerMonth: UNLIMITED, aiGenerationsPerDay: 600, sequences: UNLIMITED, integrations: UNLIMITED, apiKeys: 20 },
-    features: ["25 utilisateurs", "Campagnes et landing pages illimitées", "Leads illimités", "Séquences illimitées", "Accès API", "Support prioritaire"],
+    features: ["25 utilisateurs", "Campagnes et landing pages illimitées", "Leads illimités", "Séquences illimitées", "Accès API"],
   },
 };
 
@@ -118,13 +127,14 @@ export function comparePlans(from: string, to: string): PlanChange {
   return a === b ? "same" : b > a ? "upgrade" : "downgrade";
 }
 
-/** Un changement vers un plan inférieur est refusé si l'usage actuel dépasse les limites du plan cible. */
+/** Un changement vers un plan inférieur est refusé si l'usage actuel dépasse une limite ferme du plan cible (les limites informatives ne comptent pas). */
 export function downgradeBlockers(target: Plan, usage: Partial<Record<keyof PlanLimits, number>>): string[] {
   const out: string[] = [];
   for (const k of Object.keys(target.limits) as (keyof PlanLimits)[]) {
+    if (INFORMATIVE_LIMITS.includes(k)) continue;
     const lim = target.limits[k];
     const u = usage[k];
-    if (lim !== UNLIMITED && u !== undefined && u > lim) out.push(`${k} : ${u} utilisé(s) pour une limite de ${lim}`);
+    if (lim !== UNLIMITED && u !== undefined && u > lim) out.push(`${LIMIT_LABEL[k]} : ${u} utilisé(s) pour une limite de ${lim}`);
   }
   return out;
 }

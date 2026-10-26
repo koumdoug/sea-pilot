@@ -25,13 +25,20 @@ async function stripe<T = Record<string, unknown>>(method: "GET" | "POST", path:
   return j as T;
 }
 
+/** Début du mois calendaire UTC (1er à 00:00:00.000 UTC) : période de comptage des leads, sans lien avec la période de facturation Stripe. */
+export function currentMonthStartUtc(now = new Date()): Date {
+  const d = new Date(now); d.setUTCDate(1); d.setUTCHours(0, 0, 0, 0);
+  return d;
+}
+
+/** Usage courant. Leads : mois calendaire UTC, hors prospects effacés (`deletedAt`), comme tous les autres compteurs de leads ; leur seuil est informatif. */
 export async function workspaceUsage(workspaceId: string): Promise<Record<keyof PlanLimits, number>> {
-  const monthStart = new Date(); monthStart.setUTCDate(1); monthStart.setUTCHours(0, 0, 0, 0);
+  const monthStart = currentMonthStartUtc();
   const [members, activeCampaigns, landingPages, leadsPerMonth, sequences, integrations, apiKeys] = await Promise.all([
     db.membership.count({ where: { workspaceId } }),
     db.campaign.count({ where: { workspaceId, status: "active" } }),
     db.landingPage.count({ where: { workspaceId, status: { not: "archived" } } }),
-    db.lead.count({ where: { workspaceId, createdAt: { gte: monthStart } } }),
+    db.lead.count({ where: { workspaceId, deletedAt: null, createdAt: { gte: monthStart } } }),
     db.followUpSequence.count({ where: { workspaceId } }),
     db.integration.count({ where: { workspaceId, status: { not: "disconnected" } } }),
     db.apiKey.count({ where: { workspaceId, revokedAt: null } }),

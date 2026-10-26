@@ -1,7 +1,8 @@
 import { createHmac } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "@/lib/db";
-import { BillingError, changePaidPlan, createCheckoutSession, handleStripeEvent, planFromPriceId, selectTrialPlan, setCancelAtPeriodEnd, stripeConfigured, verifyStripeSignature, workspaceUsage } from "@/lib/billing";
+import { BillingError, changePaidPlan, createCheckoutSession, currentMonthStartUtc, handleStripeEvent, planFromPriceId, selectTrialPlan, setCancelAtPeriodEnd, stripeConfigured, verifyStripeSignature, workspaceUsage } from "@/lib/billing";
+import { createLead, eraseLead } from "@/lib/leads";
 import { entitlement } from "@/lib/plans";
 import { POST as webhook } from "@/app/api/stripe/webhook/route";
 import { makeWorkspace, resetDb } from "./helpers";
@@ -52,6 +53,59 @@ describe("essai sans Stripe : pas de faux paiement", () => {
     await createLeadRaw(workspaceId);
     const u = await workspaceUsage(workspaceId);
     expect(u).toMatchObject({ members: 1, activeCampaigns: 1, leadsPerMonth: 1, landingPages: 0 });
+  });
+
+  it("le compteur de leads exclut les prospects effacés (comme les autres compteurs de leads)", async () => {
+    const { workspaceId } = await makeWorkspace();
+    const a = await createLead({ workspaceId, name: "A", email: "a@x.com" });
+    await createLead({ workspaceId, name: "B", email: "b@x.com" });
+    expect((await workspaceUsage(workspaceId)).leadsPerMonth).toBe(2);
+    expect(await eraseLead(workspaceId, a.lead.id)).toBe(true);
+    expect((await workspaceUsage(workspaceId)).leadsPerMonth).toBe(1);
+    expect(await db.lead.count({ where: { workspaceId, deletedAt: null } })).toBe(1); // même valeur que la liste des leads
+  });
+
+  it("période de comptage : mois calendaire UTC, bornes incluses au début et exclues avant", async () => {
+    const { workspaceId } = await makeWorkspace();
+    const start = currentMonthStartUtc();
+    expect([start.getUTCDate(), start.getUTCHours(), start.getUTCMinutes(), start.getUTCSeconds(), start.getUTCMilliseconds()]).toEqual([1, 0, 0, 0, 0]);
+    await db.lead.create({ data: { workspaceId, name: "mois précédent", createdAt: new Date(start.getTime() - 1) } });
+    await db.lead.create({ data: { workspaceId, name: "début du mois", createdAt: start } });
+    await db.lead.create({ data: { workspaceId, name: "maintenant" } });
+    expect((await workspaceUsage(workspaceId)).leadsPerMonth).toBe(2);
+  });
+
+  it("currentMonthStartUtc : indépendant du fuseau local, bornes de mois et d'année", () => {
+    expect(currentMonthStartUtc(new Date("2026-03-15T10:30:00.000Z")).toISOString()).toBe("2026-03-01T00:00:00.000Z");
+    expect(currentMonthStartUtc(new Date("2026-03-01T00:00:00.000Z")).toISOString()).toBe("2026-03-01T00:00:00.000Z");
+    expect(currentMonthStartUtc(new Date("2026-02-28T23:59:59.999Z")).toISOString()).toBe("2026-02-01T00:00:00.000Z");
+    expect(currentMonthStartUtc(new Date("2026-12-31T23:59:59.999Z")).toISOString()).toBe("2026-12-01T00:00:00.000Z");
+    expect(currentMonthStartUtc(new Date("2027-01-01T00:00:00.000Z")).toISOString()).toBe("2027-01-01T00:00:00.000Z");
+  });
+});
+
+describe("downgrade : le quota de leads est informatif, les autres limites restent bloquantes", () => {
+  const seedLeads = (workspaceId: string, n: number) => db.lead.createMany({ data: Array.from({ length: n }, (_, i) => ({ workspaceId, name: `L${i}` })) });
+
+  it("leads au-dessus du seuil du plan cible : le downgrade n'est pas bloqué par ce seul quota", async () => {
+    const { workspaceId } = await makeWorkspace();
+    await selectTrialPlan(workspaceId, "growth");
+    await seedLeads(workspaceId, 350); // Starter : seuil indicatif de 300
+    expect((await workspaceUsage(workspaceId)).leadsPerMonth).toBe(350);
+    await selectTrialPlan(workspaceId, "starter");
+    expect((await db.subscription.findUniqueOrThrow({ where: { workspaceId } })).plan).toBe("starter");
+  });
+
+  it("une autre limite dépassée bloque toujours, avec un message en français et sans clé technique", async () => {
+    const { workspaceId } = await makeWorkspace();
+    await selectTrialPlan(workspaceId, "growth");
+    await seedLeads(workspaceId, 350);
+    for (let i = 0; i < 4; i++) await db.landingPage.create({ data: { workspaceId, name: `P${i}`, slug: `p${i}`, sections: [] } });
+    const e = await selectTrialPlan(workspaceId, "starter").catch((x) => x as Error);
+    expect(e).toBeInstanceOf(BillingError);
+    expect((e as Error).message).toMatch(/Landing pages : 4 utilisé\(s\) pour une limite de 3/);
+    expect((e as Error).message).not.toMatch(/leadsPerMonth|landingPages|Leads ce mois-ci/);
+    expect((await db.subscription.findUniqueOrThrow({ where: { workspaceId } })).plan).toBe("growth");
   });
 });
 

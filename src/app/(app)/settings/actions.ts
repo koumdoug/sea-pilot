@@ -108,7 +108,7 @@ export async function saveQualificationAction(_: ActionState, fd: FormData): Pro
     if (d.warm >= d.hot) throw new UserError("Le seuil « tiède » doit être inférieur au seuil « chaud ».");
     const criteria = normalizeCriteria(["need", "budget", "urgency", "fit", "location", "size", "intent"].map((key) => ({ key, label: key, weight: Number(raw[`w_${key}`] ?? 0), enabled: raw[`e_${key}`] === "on" })));
     if (!criteria.some((c) => c.enabled && c.weight > 0)) throw new UserError("Activez au moins un critère avec un poids supérieur à 0.");
-    const data = { criteria: criteria as unknown as object, hotThreshold: d.hot, warmThreshold: d.warm, autoQualify: raw.autoQualify === "on", useAi: raw.useAi === "on" };
+    const data = { criteria: criteria as unknown as object, hotThreshold: d.hot, warmThreshold: d.warm, autoQualify: raw.autoQualify === "on" };
     await db.qualificationConfig.upsert({ where: { workspaceId: ctx.workspaceId }, create: { workspaceId: ctx.workspaceId, ...data }, update: data });
     revalidatePath("/settings");
     return { ok: true, message: "Critères de qualification enregistrés. Ils s'appliquent aux prochaines qualifications." };

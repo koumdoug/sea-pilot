@@ -40,6 +40,11 @@ test.describe.serial("parcours client SEA Pilot", () => {
     await expect(page.locator('meta[name="description"]')).toHaveAttribute("content", /SEA Pilot/);
     await expect(page.locator('meta[property="og:title"]')).toHaveCount(1);
     for (const id of ["#fonctionnement", "#fonctionnalites", "#tarifs", "#faq"]) await expect(page.locator(id)).toHaveCount(1);
+    // seuils de leads indicatifs ; aucune promesse de support prioritaire
+    await expect(page.locator("#tarifs")).toContainText("300 leads / mois (seuil indicatif)");
+    await expect(page.locator("#tarifs")).toContainText("2 000 leads / mois (seuil indicatif)");
+    await expect(page.locator("#tarifs")).toContainText("Leads illimités");
+    await expect(page.locator("#tarifs")).not.toContainText("Support prioritaire");
 
     await page.goto("/demo");
     await expect(page.getByText("Données de démonstration").first()).toBeVisible();
@@ -308,6 +313,10 @@ test.describe.serial("parcours client SEA Pilot", () => {
   test("facturation : essai, Stripe non configuré = pas de faux paiement, changement de plan d'essai", async () => {
     await page.goto("/billing");
     await expect(page.getByText("Essai gratuit", { exact: true })).toBeVisible();
+    await expect(page.getByText("300 leads / mois (seuil indicatif)")).toBeVisible();
+    await expect(page.getByText("Leads ce mois-ci (seuil indicatif)")).toBeVisible();
+    await expect(page.getByText(/leur seuil est indicatif et n'interrompt pas la capture/)).toBeVisible();
+    await expect(page.getByText("Support prioritaire")).toHaveCount(0);
     await expect(page.getByText("Paiement : configuration requise")).toBeVisible();
     await expect(page.getByRole("button", { name: /Souscrire/ })).toHaveCount(0);
     await page.getByRole("button", { name: "Essayer ce plan" }).first().click();
@@ -316,6 +325,13 @@ test.describe.serial("parcours client SEA Pilot", () => {
   });
 
   test("réglages : clé API créée, utilisée pour envoyer un lead, révoquée", async () => {
+    // qualification : plus de réglage IA inopérant, information sur la qualification IA manuelle
+    await page.goto("/settings?tab=qualification");
+    await expect(page.getByText("Critères de qualification").first()).toBeVisible();
+    await expect(page.getByText(/Affiner avec l'IA/)).toHaveCount(0);
+    await expect(page.getByLabel(/Affiner avec l'IA/)).toHaveCount(0);
+    await expect(page.getByText(/L'analyse par l'IA se lance manuellement depuis la fiche d'un lead/)).toBeVisible();
+
     await page.goto("/settings?tab=api");
     await field(page, "Nom de la clé").fill("CRM externe");
     await page.getByRole("button", { name: "Créer la clé" }).click();

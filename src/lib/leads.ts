@@ -111,6 +111,7 @@ export async function createLead(i: NewLeadInput): Promise<{ lead: Lead; duplica
   await db.notification.create({ data: { workspaceId: i.workspaceId, type: "lead", title: `Nouveau lead : ${lead.name}`, body: lead.company ?? lead.email ?? undefined, href: `/leads/${lead.id}` } });
 
   // Qualification automatique et séquences à inscription automatique : ne doivent jamais faire échouer la capture.
+  // La qualification automatique est déterministe (règles) : jamais d'appel IA à la création d'un lead.
   try {
     const cfg = await db.qualificationConfig.findUnique({ where: { workspaceId: i.workspaceId } });
     if (!cfg || cfg.autoQualify) await qualifyLeadService({ workspaceId: i.workspaceId, leadId: lead.id, userId: null, allowAi: false });
@@ -213,7 +214,8 @@ export async function qualifyLeadService(p: { workspaceId: string; leadId: strin
   let method: "rules" | "rules+ai" = "rules";
   let provider: string | null = null, model: string | null = null;
 
-  const wantAi = (p.allowAi ?? cfg?.useAi ?? false) && !!getProvider();
+  // L'IA n'est lancée que sur demande explicite (action manuelle « Qualifier avec l'IA ») ET avec un fournisseur disponible. Aucun réglage enregistré ne l'active (la colonne useAi n'est plus lue).
+  const wantAi = p.allowAi === true && !!getProvider();
   if (wantAi && ws) {
     try {
       const r = await generate({

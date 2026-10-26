@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PLANS, UNLIMITED, comparePlans, downgradeBlockers, entitlement, limitReached } from "@/lib/plans";
+import { INFORMATIVE_LIMITS, LIMIT_LABEL, PLANS, UNLIMITED, comparePlans, downgradeBlockers, entitlement, limitReached } from "@/lib/plans";
 import { assertCan, can, PermissionError } from "@/lib/permissions";
 import { canTransition, launchBlockers, utmDefaults } from "@/lib/campaigns";
 
@@ -54,6 +54,47 @@ describe("limites de plan", () => {
   it("le downgrade est bloqué si l'usage dépasse le plan cible", () => {
     expect(downgradeBlockers(PLANS.starter, { landingPages: 5, members: 1 })).toHaveLength(1);
     expect(downgradeBlockers(PLANS.starter, { landingPages: 2 })).toHaveLength(0);
+  });
+  it("le quota de leads est informatif : il ne bloque jamais un downgrade à lui seul", () => {
+    expect(downgradeBlockers(PLANS.starter, { leadsPerMonth: 301 })).toEqual([]);
+    expect(downgradeBlockers(PLANS.starter, { leadsPerMonth: 50_000 })).toEqual([]);
+    expect(downgradeBlockers(PLANS.growth, { leadsPerMonth: 2_001 })).toEqual([]);
+    expect(INFORMATIVE_LIMITS).toEqual(["leadsPerMonth"]);
+  });
+  it("les autres blocages de downgrade subsistent, y compris quand le quota de leads est dépassé", () => {
+    const usage = { leadsPerMonth: 5_000, members: 2, activeCampaigns: 4, landingPages: 4, sequences: 2, integrations: 3, apiKeys: 2 };
+    expect(downgradeBlockers(PLANS.starter, usage)).toHaveLength(6); // tout sauf les leads
+    expect(downgradeBlockers(PLANS.starter, { leadsPerMonth: 5_000, members: 2 })).toHaveLength(1);
+  });
+  it("les messages de blocage sont en français, sans clé technique", () => {
+    const m = downgradeBlockers(PLANS.starter, { members: 2, activeCampaigns: 4, landingPages: 4, sequences: 2, integrations: 3, apiKeys: 2 }).join(" | ");
+    for (const key of ["members", "activeCampaigns", "landingPages", "sequences", "integrations", "apiKeys", "leadsPerMonth"]) expect(m).not.toContain(key);
+    expect(m).toMatch(/Utilisateurs : 2 utilisé\(s\) pour une limite de 1/);
+    expect(m).toMatch(/Landing pages : 4 utilisé\(s\) pour une limite de 3/);
+  });
+});
+
+describe("fonctionnalités affichées des forfaits", () => {
+  it("les seuils de leads sont présentés comme indicatifs ; Pro reste illimité", () => {
+    expect(PLANS.starter.features).toContain("300 leads / mois (seuil indicatif)");
+    expect(PLANS.growth.features).toContain("2 000 leads / mois (seuil indicatif)");
+    expect(PLANS.pro.features).toContain("Leads illimités");
+    expect(PLANS.starter.features).not.toContain("300 leads / mois");
+    expect(PLANS.growth.features).not.toContain("2 000 leads / mois");
+  });
+  it("« Support prioritaire » n'est promis par aucun forfait (données canoniques de l'accueil et de la facturation)", () => {
+    for (const p of Object.values(PLANS)) {
+      expect([p.tagline, ...p.features].join(" | ")).not.toMatch(/support/i);
+    }
+  });
+  it("les autres fonctionnalités Pro sont conservées", () => {
+    expect(PLANS.pro.features).toEqual(["25 utilisateurs", "Campagnes et landing pages illimitées", "Leads illimités", "Séquences illimitées", "Accès API"]);
+  });
+  it("les libellés de limites couvrent toutes les limites, sans clé technique", () => {
+    for (const k of Object.keys(PLANS.starter.limits) as (keyof typeof PLANS.starter.limits)[]) {
+      expect(LIMIT_LABEL[k]).toBeTruthy();
+      expect(LIMIT_LABEL[k]).not.toBe(k);
+    }
   });
 });
 

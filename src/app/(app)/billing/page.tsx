@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { requireCtx } from "@/lib/tenant";
 import { env } from "@/lib/env";
-import { PLANS, UNLIMITED, comparePlans, type PlanLimits } from "@/lib/plans";
+import { INFORMATIVE_LIMITS, LIMIT_LABEL, PLANS, UNLIMITED, comparePlans, type PlanLimits } from "@/lib/plans";
 import { PLAN_IDS } from "@/lib/constants";
 import { planCheckoutReady, stripeConfigured, workspaceUsage } from "@/lib/billing";
 import { Alert, Badge, Card, ConfigRequired, PageHeader, Section, fmtDate } from "@/components/ui";
@@ -10,7 +10,6 @@ import { InlineAction } from "@/components/forms";
 import { cancelAction, changePlanAction, checkoutAction, portalAction, selectTrialPlanAction } from "./actions";
 
 export const metadata: Metadata = { title: "Billing" };
-const LIMIT_LABEL: Record<keyof PlanLimits, string> = { members: "Utilisateurs", activeCampaigns: "Campagnes actives", landingPages: "Landing pages", leadsPerMonth: "Leads ce mois-ci", aiGenerationsPerDay: "Générations IA / jour", sequences: "Séquences de relance", integrations: "Intégrations", apiKeys: "Clés API" };
 const STATE_LABEL: Record<string, string> = { exempt: "Accès propriétaire gratuit", trial: "Essai gratuit", paid: "Abonnement actif", past_due: "Paiement en échec", canceling: "Résiliation programmée", trial_expired: "Essai terminé", canceled: "Abonnement terminé", incomplete: "Incomplet" };
 
 export default async function BillingPage({ searchParams }: { searchParams: Promise<{ blocked?: string; success?: string; canceled?: string }> }) {
@@ -76,7 +75,7 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
         })}
       </ul>
 
-      <Section title="Usage" description="Utilisation actuelle par rapport aux limites du plan.">
+      <Section title="Usage" description="Utilisation actuelle par rapport aux limites du plan. Les leads sont comptés par mois calendaire (UTC), hors prospects effacés ; leur seuil est indicatif et n'interrompt pas la capture.">
         <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {(Object.keys(e.plan.limits) as (keyof PlanLimits)[]).filter((k) => k !== "aiGenerationsPerDay").map((k) => {
             const lim = e.plan.limits[k];
@@ -85,7 +84,9 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
             return (
               <li key={k} className="rounded-lg border border-slate-200 p-3 text-sm"><div className="flex justify-between"><span>{LIMIT_LABEL[k]}</span><span className="tabular-nums font-medium">{used} / {lim === UNLIMITED ? "∞" : lim}</span></div>
                 <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100" role="progressbar" aria-valuenow={used} aria-valuemin={0} aria-valuemax={lim === UNLIMITED ? undefined : lim} aria-label={LIMIT_LABEL[k]}><div className={`h-full ${pct >= 100 ? "bg-red-500" : pct >= 80 ? "bg-amber-500" : "bg-brand-600"}`} style={{ width: `${pct}%` }} /></div>
-                {lim !== UNLIMITED && used > lim && <p className="mt-1 text-xs text-red-700">Limite dépassée : passez à un plan supérieur.</p>}</li>
+                {lim !== UNLIMITED && used > lim && (INFORMATIVE_LIMITS.includes(k)
+                  ? <p className="mt-1 text-xs text-amber-700">Seuil indicatif dépassé ce mois-ci : la capture de vos leads n'est pas interrompue.</p>
+                  : <p className="mt-1 text-xs text-red-700">Limite dépassée : passez à un plan supérieur.</p>)}</li>
             );
           })}
         </ul>

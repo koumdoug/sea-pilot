@@ -141,7 +141,7 @@ async function Qualification({ workspaceId, canEdit }: { workspaceId: string; ca
           ))}</tbody></TableWrap>
         <div className="grid gap-4 sm:grid-cols-2"><TextField name="hot" label="Seuil « chaud » (score ≥)" type="number" min={1} max={100} defaultValue={th.hot} required /><TextField name="warm" label="Seuil « tiède » (score ≥)" type="number" min={0} max={99} defaultValue={th.warm} required /></div>
         <CheckField name="autoQualify" label="Qualifier automatiquement chaque nouveau lead (et passer les leads « chauds » à « Qualifié »)" defaultChecked={cfg?.autoQualify ?? true} />
-        <CheckField name="useAi" label="Affiner avec l'IA lorsque c'est possible" defaultChecked={cfg?.useAi ?? false} help="Nécessite un fournisseur d'IA. Les ajustements de l'IA sont toujours présentés comme des inférences." />
+        <p className="text-sm text-slate-600">La qualification automatique applique ces critères, sans appel à l'IA. L'analyse par l'IA se lance manuellement depuis la fiche d'un lead (« Qualifier avec l'IA »), lorsqu'un fournisseur est configuré ; ses ajustements sont toujours présentés comme des inférences.</p>
         {canEdit && <SubmitButton>Enregistrer</SubmitButton>}
       </ActionForm>
     </Section>

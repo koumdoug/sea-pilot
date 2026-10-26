@@ -295,3 +295,25 @@ test("D2. onboarding : « .28 » tapé au clavier à l'étape Offre — bloqué 
   expect(offer?.marginPct).toBe(0.28);
   expect(offer?.price).toBe(0.5);
 });
+
+// Lot 3A / R18 : (même compte que les tests ci-dessus : l'inscription est limitée à 5 par heure) le taux de conversion du tableau de bord est
+// GLOBAL (leads et clics sans campagne inclus) : il est libellé comme tel et le taux rattaché aux campagnes est affiché à côté.
+test("R18. tableau de bord : taux de conversion libellé « global » et taux rattaché aux campagnes affiché à côté", async () => {
+  await ensureLoggedIn();
+  await setOnboardingDone(true);
+  const ws = await db.workspace.findFirstOrThrow({ where: { name: U.company } });
+  const campaign = await db.campaign.create({ data: { workspaceId: ws.id, name: "Campagne R18", status: "active", platform: "google_ads" } });
+  const day = new Date(`${new Date().toISOString().slice(0, 10)}T00:00:00Z`);
+  await db.metric.create({ data: { workspaceId: ws.id, campaignId: campaign.id, platform: "google_ads", date: day, spend: 100, impressions: 5000, clicks: 200, dedupeKey: `r18-a-${stamp}` } });
+  await db.metric.create({ data: { workspaceId: ws.id, campaignId: null, platform: "google_ads", date: day, spend: 20, impressions: 800, clicks: 40, dedupeKey: `r18-b-${stamp}` } });
+  await db.lead.createMany({ data: [
+    ...Array.from({ length: 10 }, (_, n) => ({ workspaceId: ws.id, name: `R18 rattaché ${n}`, email: `r18a${n}.${stamp}@e2e.test`, campaignId: campaign.id, source: "manuel" })),
+    ...Array.from({ length: 20 }, (_, n) => ({ workspaceId: ws.id, name: `R18 sans campagne ${n}`, email: `r18b${n}.${stamp}@e2e.test`, source: "manuel" })),
+  ] });
+  await page.goto("/dashboard");
+  // global : 30 leads / 240 clics = 12,5 % ; rattaché aux campagnes : 10 leads / 200 clics = 5,0 %
+  await expect(page.getByText("Taux de conversion (global)")).toBeVisible();
+  await expect(page.getByText("12,5 %", { exact: true })).toBeVisible();
+  await expect(page.getByText(/rattaché aux campagnes : 5,0 %/)).toBeVisible();
+  await expect(page.getByText("Taux de conversion", { exact: true }), "l'ancien libellé ambigu a disparu").toHaveCount(0);
+});

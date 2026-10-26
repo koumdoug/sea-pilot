@@ -39,7 +39,8 @@ describe("facteur de sécurité : valeur par défaut et injection", () => {
 });
 
 describe("état B : au point mort ou au-dessus, facteur non défini", () => {
-  const sentence = "Au point mort ou au-dessus, marge de sécurité non définie ; scaling non recommandé.";
+  // Lot 3A : formulation client exacte du cas B (apostrophes typographiques).
+  const sentence = "Sur la période, la marge brute couvre les dépenses publicitaires de cette campagne. SEA Pilot n’émet pas encore de recommandation de hausse de budget : appuyez-vous sur vos marges réelles et sur l’évolution semaine après semaine.";
   it("point mort exact (marge 25, ROAS 4,00) : pas de scaling, message B", () => {
     const r = find(camp(4, 25))!;
     expect(r.type).toBe("revenue_signal");
@@ -165,7 +166,7 @@ describe("marge absente, nulle, invalide ou ambiguë : aucune affirmation de ren
   it("marge 100 : point mort 1 → ROAS 4 reste sans scaling avec facteur null", () => {
     const r = find(camp(4, 100))!;
     expect(r.type).toBe("revenue_signal");
-    expect(r.problem).toContain("marge de sécurité non définie");
+    expect(r.problem).toContain("la marge brute couvre les dépenses publicitaires de cette campagne"); // lot 3A : nouvelle formulation du cas B
   });
 });
 

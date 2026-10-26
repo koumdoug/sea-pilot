@@ -258,7 +258,9 @@ test.describe.serial("parcours client SEA Pilot", () => {
     await expect(tile("Leads")).toContainText("1");
     await page.goto("/dashboard");
     await expect(page.getByText("Santé de l'acquisition")).toBeVisible();
-    await expect(page.getByText("Données insuffisantes")).toHaveCount(0);
+    // Lot 3A : le badge d'état de santé ne doit plus afficher « Données insuffisantes » (texte EXACT). La recherche était une sous-chaîne : elle capte aussi
+    // le titre de la carte « Données insuffisantes — <campagne> » (une campagne à 1 lead et 400 clics n'a pas encore assez de leads pour le coût par lead).
+    await expect(page.getByText("Données insuffisantes", { exact: true })).toHaveCount(0);
   });
 
   test("automatisations : séquence J0-J14, inscription, exécution — jamais d'e-mail réel sans configuration", async () => {

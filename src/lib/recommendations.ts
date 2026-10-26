@@ -8,7 +8,7 @@ import { isAmbiguousMarginPct, isReliableMarginPct } from "./margin";
 export type Priority = "high" | "medium" | "low";
 export type Recommendation = {
   id: string;
-  type: "cpl_high" | "ctr_low" | "underperforming" | "landing_weak" | "cpc_high" | "high_conversion" | "scaling" | "revenue_signal" | "tracking_check" | "lead_drop" | "stale_leads" | "no_tracking" | "cac_high";
+  type: "cpl_high" | "ctr_low" | "underperforming" | "landing_weak" | "cpc_high" | "high_conversion" | "scaling" | "revenue_signal" | "tracking_check" | "lead_drop" | "stale_leads" | "no_tracking" | "cac_high" | "insufficient_data";
   priority: Priority;
   title: string;
   problem: string;
@@ -49,11 +49,11 @@ export const SCALING_SAFETY_FACTOR: number | null = null;
 /** Un facteur n'est utilisable que fini et ≥ 1 (en dessous de 1, le « seuil » serait sous le point mort). */
 const usableSafetyFactor = (f: unknown): number | null => (typeof f === "number" && Number.isFinite(f) && f >= 1 ? f : null);
 
-/** Seuils explicites (testés). */
+/** Seuils explicites (testés). Ce sont des seuils opérationnels PROVISOIRES (« à valider »), pas des vérités statistiques universelles. */
 export const REC_THRESHOLDS = {
   /** clients minimum pour qu'une campagne ait sa propre référence de CPL (CAC max × son taux de closing) */
   minCustomersOwnTarget: 5,
-  /** échantillon suffisant pour une priorité élevée : au moins 30 leads OU 5 clients */
+  /** échantillon suffisant pour une priorité élevée (cpl_high, cac_high, scaling) : au moins 30 leads ET 5 clients (proposition à valider) */
   minLeadsForPriority: 30,
   minCustomersForPriority: 5,
   /** « sans résultat » : au moins 5 leads attendus au rythme de référence (sinon, sans référence : 100 clics) */
@@ -68,6 +68,13 @@ export const REC_THRESHOLDS = {
   landingMinZ: 1.645,
   /** scaling : ROAS minimal historique (conservé) ; avec une marge valide, le plancher théorique 100 / marge s'y ajoute */
   scalingMinRoas: 3,
+  /** coût par lead : au moins 3 leads pour qu'il soit évalué */
+  minLeadsForCpl: 3,
+  /** CTR : au moins 1 000 impressions ET 30 clics, sinon aucune conclusion statistique (proposition à valider) */
+  ctrMinImpressions: 1000,
+  ctrMinClicks: 30,
+  /** baisse de leads : au moins 10 leads sur la période précédente, sinon aucune conclusion (proposition à valider) */
+  minPreviousLeadsForDrop: 10,
 } as const;
 const T = REC_THRESHOLDS;
 
@@ -87,13 +94,19 @@ export function trackingState(pages: RecPage[], clicks: number): Tracking {
   return views / clicks < T.trackingMinViewRatio ? "doubtful" : "plausible";
 }
 
-/** Échantillon financier (scaling, signal de rentabilité) : au moins 30 leads ET 5 clients — seuils opérationnels initiaux, pas une preuve de significativité. */
-const financialSampleOk = (k: Kpis) => k.leads >= T.minLeadsForPriority && k.customers >= T.minCustomersForPriority;
-const financialSampleText = (k: Kpis) => `Échantillon : ${k.leads} lead(s), ${k.customers} client(s)${financialSampleOk(k) ? "" : ` — insuffisant (il faut au moins ${T.minLeadsForPriority} leads ET ${T.minCustomersForPriority} clients) : résultat indicatif`}`;
+/**
+ * Échantillon suffisant : au moins 30 leads ET 5 clients (conjonction stricte). Seuils opérationnels PROVISOIRES (« à valider »),
+ * pas une preuve de significativité statistique : en dessous, une alerte financière reste basse et nomme le volume manquant.
+ */
+const sampleOk = (k: Kpis) => k.leads >= T.minLeadsForPriority && k.customers >= T.minCustomersForPriority;
+/** Volume manquant pour atteindre l'échantillon suffisant, par exemple « 4 client(s) » ou « 20 lead(s) et 3 client(s) ». */
+const missingSample = (k: Kpis) => [k.leads < T.minLeadsForPriority ? `${T.minLeadsForPriority - k.leads} lead(s)` : "", k.customers < T.minCustomersForPriority ? `${T.minCustomersForPriority - k.customers} client(s)` : ""].filter(Boolean).join(" et ");
+const sampleText = (k: Kpis) => `Échantillon : ${k.leads} lead(s), ${k.customers} client(s)${sampleOk(k) ? "" : ` — insuffisant : il manque ${missingSample(k)} pour atteindre ${T.minLeadsForPriority} leads ET ${T.minCustomersForPriority} clients (seuils opérationnels provisoires) : résultat indicatif`}`;
 const ROAS_EPS = 1e-9; // tolérance flottante : « au point mort » ne dépend pas d'un arrondi de la dernière décimale
-
-const sampleOk = (k: Kpis) => k.leads >= T.minLeadsForPriority || k.customers >= T.minCustomersForPriority;
-const sampleText = (k: Kpis) => `Échantillon : ${k.leads} lead(s), ${k.customers} client(s)${sampleOk(k) ? "" : " — insuffisant (moins de 30 leads et moins de 5 clients) : résultat indicatif"}`;
+/** Libellés de statut pour les textes de campagne non active. */
+const STATUS_LABEL: Record<string, string> = { paused: "en pause", completed: "terminée", archived: "archivée", draft: "en brouillon", ready: "prête, non lancée" };
+/** Formulation client du cas B : point mort atteint avec une marge valide, aucun facteur de sécurité validé. Ne pas modifier sans décision métier. */
+const BREAK_EVEN_REACHED_TEXT = "Sur la période, la marge brute couvre les dépenses publicitaires de cette campagne. SEA Pilot n’émet pas encore de recommandation de hausse de budget : appuyez-vous sur vos marges réelles et sur l’évolution semaine après semaine.";
 
 export function buildRecommendations(i: RecInput): Recommendation[] {
   const out: Recommendation[] = [];
@@ -129,8 +142,10 @@ export function buildRecommendations(i: RecInput): Recommendation[] {
 
   for (const c of live) {
     const k = c.kpis;
+    const gaps: string[] = []; // règles non évaluées faute de volume (carte « Données insuffisantes »)
     // 2. CPL trop élevé — référence propre à la campagne quand l'échantillon le permet
-    if (k.cpl !== null && k.leads >= 3) {
+    if (k.spend > 0 && k.leads < T.minLeadsForCpl) gaps.push(`Coût par lead : il manque ${T.minLeadsForCpl - k.leads} lead(s) (minimum ${T.minLeadsForCpl} leads)`);
+    if (k.cpl !== null && k.leads >= T.minLeadsForCpl) {
       let ref: number | null = null;
       let basis = "";
       if (i.goals.maxCac && k.customers >= T.minCustomersOwnTarget && k.closeRate) { ref = i.goals.maxCac * k.closeRate; basis = "propre à la campagne (CAC maximum × son taux de closing)"; }
@@ -149,7 +164,10 @@ export function buildRecommendations(i: RecInput): Recommendation[] {
       }
     }
     // 3. CTR faible
-    if (k.ctr !== null && k.impressions >= 1000 && k.ctr < 0.005) {
+    const missImpressions = Math.max(0, T.ctrMinImpressions - k.impressions);
+    const missClicks = Math.max(0, T.ctrMinClicks - k.clicks);
+    if (missImpressions > 0 || missClicks > 0) gaps.push(`CTR : il manque ${[missImpressions > 0 ? `${fmtNum(missImpressions)} impression(s)` : "", missClicks > 0 ? `${fmtNum(missClicks)} clic(s)` : ""].filter(Boolean).join(" et ")} (minimum ${fmtNum(T.ctrMinImpressions)} impressions ET ${T.ctrMinClicks} clics)`);
+    if (k.ctr !== null && missImpressions === 0 && missClicks === 0 && k.ctr < 0.005) {
       out.push({
         id: `ctr_low:${c.id}`, type: "ctr_low", priority: k.spend > 0 && k.ctr < 0.002 ? "high" : "medium", campaignId: c.id,
         title: `CTR faible — ${c.name}`,
@@ -159,30 +177,44 @@ export function buildRecommendations(i: RecInput): Recommendation[] {
         action: "Testez au moins 2 nouvelles accroches dans l'AI Studio et comparez-les à l'existante pendant 7 jours.",
       });
     }
-    // 4. Campagne sans lead : seulement si assez de clics pour attendre des leads, et selon la plausibilité du suivi
+    // 4. Campagne sans lead : seulement si assez de clics pour attendre des leads, et selon la plausibilité du suivi.
+    //    Texte et priorité respectent le STATUT : une campagne non active ne reçoit jamais « Mettez la campagne en pause ».
     if (k.spend > 0 && k.leads === 0) {
       const refCvr = base.cvr !== null && base.cvr > 0 ? base.cvr : null; // taux nul = pas de référence : seuil absolu en clics
       const expected = refCvr !== null ? k.clicks * refCvr : null;
       const enough = expected !== null ? expected >= T.minExpectedLeadsNoResult : k.clicks >= T.minClicksNoReference;
+      if (!enough) {
+        const needed = refCvr !== null ? Math.ceil(T.minExpectedLeadsNoResult / refCvr - 1e-9) : T.minClicksNoReference;
+        gaps.push(`Campagne sans résultat : il manque ${fmtNum(Math.max(1, needed - k.clicks))} clic(s) (${refCvr !== null ? `au rythme de référence, ${T.minExpectedLeadsNoResult} leads seraient attendus` : `minimum ${T.minClicksNoReference} clics sans référence de conversion`})`);
+      }
       if (enough) {
-        const paused = c.status === "paused";
+        const active = c.status === "active";
+        const trackingOk = tracking === "plausible";
         const views = i.pages.reduce((s, p) => s + p.views, 0);
         const evidence = [`Dépense : ${fmt(k.spend, cur)}`, `${fmtNum(k.clicks)} clics, 0 lead`, ...(expected !== null ? [`Au rythme de référence (${fmtPct(refCvr, 1)} de clics en leads), environ ${fmtDec(expected, 1)} lead(s) étaient attendus`] : []), `Suivi : ${fmtNum(views)} visite(s) mesurée(s) pour ${fmtNum(i.overall.clicks)} clic(s)`];
         let action: string;
         let priority: Priority;
         let problem: string;
-        if (tracking !== "plausible") {
-          priority = "medium";
-          problem = "La campagne dépense du budget et génère des clics sans lead, mais le suivi n'est pas jugé fiable : le résultat peut venir de la mesure.";
-          action = "Vérifiez d'abord le suivi (URL de destination, paramètres UTM, formulaire de la landing page) avant toute décision de pause.";
-        } else if (paused) {
-          priority = "low";
-          problem = "La campagne, déjà en pause, avait dépensé du budget et généré des clics sans aucun lead.";
-          action = "Elle est déjà en pause : ne la relancez qu'après avoir corrigé le message ou la landing page et vérifié que le formulaire fonctionne.";
+        if (active) {
+          if (!trackingOk) {
+            priority = "medium";
+            problem = "La campagne dépense du budget et génère des clics sans lead, mais le suivi n'est pas jugé fiable : le résultat peut venir de la mesure.";
+            action = "Vérifiez d'abord le suivi (URL de destination, paramètres UTM, formulaire de la landing page) avant toute décision de pause.";
+          } else {
+            priority = "high";
+            problem = "La campagne dépense du budget et génère des clics, mais aucun lead, alors que le suivi paraît plausible.";
+            action = "Mettez la campagne en pause, vérifiez le formulaire de la landing page (fonctionne-t-il ?) puis relancez avec un message corrigé.";
+          }
         } else {
-          priority = "high";
-          problem = "La campagne dépense du budget et génère des clics, mais aucun lead, alors que le suivi paraît plausible.";
-          action = "Mettez la campagne en pause, vérifiez le formulaire de la landing page (fonctionne-t-il ?) puis relancez avec un message corrigé.";
+          // Campagne non active (en pause, terminée, archivée, brouillon, prête) : aucune pause à recommander, priorité basse ; le suivi reste signalé s'il est douteux.
+          const label = STATUS_LABEL[c.status] ?? `statut « ${c.status} »`;
+          const relaunch = "ne la relancez qu'après avoir corrigé le message ou la landing page et vérifié que le formulaire fonctionne.";
+          const trackingFirst = "Vérifiez d'abord le suivi (URL de destination, paramètres UTM, formulaire de la landing page) avant toute relance.";
+          priority = "low";
+          problem = `La campagne (${label}) avait dépensé du budget et généré des clics sans aucun lead${trackingOk ? "." : ", mais le suivi n'est pas jugé fiable : le résultat peut venir de la mesure."}`;
+          action = c.status === "paused"
+            ? (trackingOk ? `Elle est déjà en pause : ${relaunch}` : `Elle est déjà en pause. ${trackingFirst}`)
+            : (trackingOk ? `Elle n'est pas diffusée (${label}) : aucune pause à faire ; ${relaunch}` : `Elle n'est pas diffusée (${label}) : aucune pause à faire. ${trackingFirst}`);
         }
         out.push({
           id: `underperforming:${c.id}`, type: "underperforming", priority, campaignId: c.id,
@@ -237,10 +269,10 @@ export function buildRecommendations(i: RecInput): Recommendation[] {
       } else if (k.roas < floor - ROAS_EPS) {
         // A. sous le point mort : jamais d'affirmation sans réserve ; priorité selon le niveau de preuve
         out.push({
-          id: `revenue_signal:${c.id}`, type: "revenue_signal", priority: financialSampleOk(k) ? "medium" : "low", campaignId: c.id,
+          id: `revenue_signal:${c.id}`, type: "revenue_signal", priority: sampleOk(k) ? "medium" : "low", campaignId: c.id,
           title: `Sous le point mort — ${c.name}`,
           problem: "Le ROAS de la campagne est inférieur au point mort théorique de son offre : à la marge renseignée, le chiffre d'affaires attribué ne couvre pas la dépense (estimation, à confirmer).",
-          evidence: [`ROAS sur chiffre d'affaires : ${fmtRatio(k.roas)}`, `Marge de l'offre : ${fmtDec(margin, 1)} % → point mort théorique : ROAS ≥ ${fmtRatio(floor)}`, `Chiffre d'affaires attribué : ${fmt(k.revenue, cur)} pour ${fmt(k.spend, cur)} dépensés`, financialSampleText(k), "Limite : ROAS calculé sur le chiffre d'affaires ; la marge de l'offre est approximative"],
+          evidence: [`ROAS sur chiffre d'affaires : ${fmtRatio(k.roas)}`, `Marge de l'offre : ${fmtDec(margin, 1)} % → point mort théorique : ROAS ≥ ${fmtRatio(floor)}`, `Chiffre d'affaires attribué : ${fmt(k.revenue, cur)} pour ${fmt(k.spend, cur)} dépensés`, sampleText(k), "Limite : ROAS calculé sur le chiffre d'affaires ; la marge de l'offre est approximative"],
           impact: "Estimation : si la marge renseignée est exacte, chaque unité dépensée rapporte moins de marge qu'elle ne coûte ; à confirmer sur un échantillon plus large.",
           action: "Ne pas augmenter le budget. Améliorez le taux de closing, le panier moyen ou le coût d'acquisition, et vérifiez la marge renseignée dans l'offre.",
         });
@@ -248,51 +280,64 @@ export function buildRecommendations(i: RecInput): Recommendation[] {
         const factor = usableSafetyFactor(i.scalingSafetyFactor === undefined ? SCALING_SAFETY_FACTOR : i.scalingSafetyFactor);
         const needed = factor === null ? null : Math.max(T.scalingMinRoas, floor * factor);
         const thresholdOk = needed !== null && k.roas >= needed - ROAS_EPS;
-        const sampleEnough = financialSampleOk(k);
+        const sampleEnough = sampleOk(k);
         if (needed !== null && thresholdOk && sampleEnough) {
           out.push({
             id: `scaling:${c.id}`, type: "scaling", priority: "medium", campaignId: c.id,
             title: `Opportunité de scaling — ${c.name}`,
             problem: "La campagne dépasse le point mort théorique de son offre avec la marge de sécurité commerciale définie.",
-            evidence: [`ROAS sur chiffre d'affaires : ${fmtRatio(k.roas)}`, `Marge de l'offre : ${fmtDec(margin, 1)} % → point mort théorique : ROAS ≥ ${fmtRatio(floor)}`, `Facteur de sécurité : ×${fmtDec(factor ?? 0, 2)} → ROAS minimal pour envisager une hausse : ${fmtRatio(needed)}`, `Chiffre d'affaires attribué : ${fmt(k.revenue, cur)} pour ${fmt(k.spend, cur)} dépensés`, financialSampleText(k)],
+            evidence: [`ROAS sur chiffre d'affaires : ${fmtRatio(k.roas)}`, `Marge de l'offre : ${fmtDec(margin, 1)} % → point mort théorique : ROAS ≥ ${fmtRatio(floor)}`, `Facteur de sécurité : ×${fmtDec(factor ?? 0, 2)} → ROAS minimal pour envisager une hausse : ${fmtRatio(needed)}`, `Chiffre d'affaires attribué : ${fmt(k.revenue, cur)} pour ${fmt(k.spend, cur)} dépensés`, sampleText(k)],
             impact: "Estimation : augmenter progressivement le budget peut accroître le bénéfice tant que le ROAS reste au-dessus du seuil.",
             action: "Augmentez le budget de 15 à 20 % toutes les semaines en surveillant le ROAS et le CPL.",
           });
         } else {
           // B. au point mort ou au-dessus : scaling non recommandé, avec la raison exacte
-          const sampleNote = sampleEnough ? "" : ` Échantillon insuffisant (moins de ${T.minLeadsForPriority} leads ou moins de ${T.minCustomersForPriority} clients) : signal indicatif.`;
+          const sampleNote = sampleEnough ? "" : ` Échantillon insuffisant (moins de ${T.minLeadsForPriority} leads ou moins de ${T.minCustomersForPriority} clients) : il manque ${missingSample(k)} ; signal indicatif.`;
           const lead = needed === null
-            ? "Au point mort ou au-dessus, marge de sécurité non définie ; scaling non recommandé."
+            ? BREAK_EVEN_REACHED_TEXT
             : !thresholdOk
               ? `Au point mort ou au-dessus, marge de sécurité non atteinte (ROAS minimal ${fmtRatio(needed)} pour un facteur de ×${fmtDec(factor ?? 0, 2)}) ; scaling non recommandé.`
-              : "Au point mort ou au-dessus et marge de sécurité atteinte, mais échantillon insuffisant ; scaling non recommandé.";
+              : "Au point mort ou au-dessus et marge de sécurité atteinte ; scaling non recommandé.";
           out.push({
             id: `revenue_signal:${c.id}`, type: "revenue_signal", priority: "low", campaignId: c.id,
             title: `Au point mort ou au-dessus — ${c.name}`,
-            problem: `${lead}${needed !== null && thresholdOk ? "" : sampleNote}`,
-            evidence: [`ROAS sur chiffre d'affaires : ${fmtRatio(k.roas)}`, `Marge de l'offre : ${fmtDec(margin, 1)} % → point mort théorique : ROAS ≥ ${fmtRatio(floor)}`, `Chiffre d'affaires attribué : ${fmt(k.revenue, cur)} pour ${fmt(k.spend, cur)} dépensés`, financialSampleText(k), "Limite : ROAS calculé sur le chiffre d'affaires ; un ROAS au point mort ne dégage aucun bénéfice"],
+            problem: `${lead}${sampleNote}`,
+            evidence: [`ROAS sur chiffre d'affaires : ${fmtRatio(k.roas)}`, `Marge de l'offre : ${fmtDec(margin, 1)} % → point mort théorique : ROAS ≥ ${fmtRatio(floor)}`, `Chiffre d'affaires attribué : ${fmt(k.revenue, cur)} pour ${fmt(k.spend, cur)} dépensés`, sampleText(k), "Limite : ROAS calculé sur le chiffre d'affaires ; un ROAS au point mort ne dégage aucun bénéfice"],
             impact: "Estimation : sans marge de sécurité validée, le ROAS actuel ne garantit pas qu'une hausse de budget reste rentable.",
             action: "Ne pas augmenter le budget sur ce seul signal : fixez d'abord une marge de sécurité commerciale (facteur appliqué au point mort) et attendez un échantillon suffisant.",
           });
         }
       }
     }
+    // 8 bis. UNE seule recommandation « Données insuffisantes » par campagne : liste les règles qui n'ont pas pu être évaluées faute de volume,
+    //        avec le volume manquant. Elle ne répète jamais une règle déjà émise (une règle non évaluée n'a émis aucune alerte), ne masque aucune
+    //        alerte technique et ne fusionne jamais deux campagnes. Campagne sans aucune donnée enregistrée : aucune carte.
+    if (gaps.length > 0 && (k.spend > 0 || k.impressions > 0 || k.clicks > 0 || k.leads > 0)) {
+      out.push({
+        id: `insufficient_data:${c.id}`, type: "insufficient_data", priority: "low", campaignId: c.id,
+        title: `Données insuffisantes — ${c.name}`,
+        problem: `Certaines analyses de « ${c.name} » n'ont pas pu être faites faute de volume : aucune conclusion ne peut être tirée sur ces points à ce stade.`,
+        evidence: gaps,
+        impact: "Aucune décision de pause ou de budget ne devrait reposer sur ces indicateurs tant que le volume minimal n'est pas atteint (seuils opérationnels provisoires).",
+        action: "Laissez la campagne accumuler des données avant de conclure ; les alertes techniques (suivi, leads à contacter) restent à traiter en priorité.",
+      });
+    }
   }
 
   // 8. CAC global trop élevé (CAC « mélangé » : dépenses et clients de tout le périmètre)
   if (i.overall.cac !== null && i.goals.maxCac && i.overall.cac > i.goals.maxCac) {
     out.push({
-      id: "cac_high", type: "cac_high", priority: i.overall.cac > i.goals.maxCac * 1.25 ? "high" : "medium",
+      id: "cac_high", type: "cac_high", priority: !sampleOk(i.overall) ? "low" : i.overall.cac > i.goals.maxCac * 1.25 ? "high" : "medium",
       title: "Coût d'acquisition client trop élevé",
       problem: "Le coût d'acquisition client dépasse le maximum fixé à l'onboarding.",
-      evidence: [`CAC global : ${fmt(i.overall.cac, cur)}`, `Maximum visé : ${fmt(i.goals.maxCac, cur)}`, `${i.overall.customers} client(s) pour ${fmt(i.overall.spend, cur)}`, ...(i.attributed && i.attributed.cac !== null && i.attributed.cac !== i.overall.cac ? [`CAC rattaché aux campagnes : ${fmt(i.attributed.cac, cur)}`] : []), "Limite : le CAC global inclut les dépenses et les clients non rattachés à une campagne"],
+      evidence: [`CAC global : ${fmt(i.overall.cac, cur)}`, `Maximum visé : ${fmt(i.goals.maxCac, cur)}`, `${i.overall.customers} client(s) pour ${fmt(i.overall.spend, cur)}`, ...(i.attributed && i.attributed.cac !== null && i.attributed.cac !== i.overall.cac ? [`CAC rattaché aux campagnes : ${fmt(i.attributed.cac, cur)}`] : []), "Limite : le CAC global inclut les dépenses et les clients non rattachés à une campagne", sampleText(i.overall)],
       impact: "Au-delà de ce seuil, chaque nouveau client réduit la marge ou la rend négative.",
-      action: "Concentrez le budget sur les campagnes au CAC le plus bas et améliorez le taux de closing des leads qualifiés.",
+      action: sampleOk(i.overall) ? "Concentrez le budget sur les campagnes au CAC le plus bas et améliorez le taux de closing des leads qualifiés." : "Données encore insuffisantes pour conclure : laissez-les s'accumuler et ne modifiez pas le budget sur ce seul indicateur.",
     });
   }
 
   // 9. Chute de leads vs période précédente
-  if (i.previous && i.previous.leads >= 5 && i.overall.leads < i.previous.leads * 0.7) {
+  if (i.previous && i.previous.leads >= T.minPreviousLeadsForDrop && i.overall.leads < i.previous.leads * 0.7) {
     const drop = Math.round((1 - i.overall.leads / i.previous.leads) * 100);
     out.push({
       id: "lead_drop", type: "lead_drop", priority: drop >= 50 ? "high" : "medium",

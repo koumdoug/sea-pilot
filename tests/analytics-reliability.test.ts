@@ -107,12 +107,15 @@ describe("CPL de référence par campagne et petits échantillons", () => {
     expect(r.problem).toMatch(/périmètre rattaché/);
     expect(r.problem).toMatch(/indicative/);
   });
-  it("priorité haute seulement si 30 leads OU 5 clients ; sinon priorité basse (seuils explicites)", () => {
+  // Lot 3A : l'échantillon suffisant est « au moins 30 leads ET 5 clients » (le OU classait haut 30 leads / 3 clients).
+  it("priorité haute seulement si 30 leads ET 5 clients ; sinon priorité basse (seuils explicites)", () => {
     expect(REC_THRESHOLDS.minLeadsForPriority).toBe(30);
     expect(REC_THRESHOLDS.minCustomersForPriority).toBe(5);
-    const big = run(campaign("c1", "active", { spend: 6000, clicks: 600, leads: 30, customers: 3, revenue: 900, customersWithRevenue: 3, impressions: 60_000 }), { goals: { maxCac: 100 } })!; // CPL 200 ≫ 1,5 × réf.
+    const big = run(campaign("c1", "active", { spend: 6000, clicks: 600, leads: 30, customers: 5, revenue: 1500, customersWithRevenue: 5, impressions: 60_000 }), { goals: { maxCac: 100 } })!; // CPL 200 ≫ 1,5 × réf. ; 30 leads ET 5 clients
+    const thirtyThree = run(campaign("c1", "active", { spend: 6000, clicks: 600, leads: 30, customers: 3, revenue: 900, customersWithRevenue: 3, impressions: 60_000 }), { goals: { maxCac: 100 } })!; // 30 leads mais 3 clients : insuffisant
     const small = run(campaign("c1", "active", { spend: 580, clicks: 90, leads: 29, customers: 3, revenue: 900, customersWithRevenue: 3, impressions: 9000 }), { goals: { maxCac: 100 } })!; // CPL 20, 29 leads, 3 clients
     expect(big.priority).toBe("high");
+    expect(thirtyThree.priority).toBe("low");
     expect(small.priority).toBe("low");
   });
   it("l'impact financier est toujours présenté comme une estimation", () => {

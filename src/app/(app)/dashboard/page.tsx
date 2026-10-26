@@ -4,7 +4,7 @@ import { db } from "@/lib/db";
 import { requireCtx } from "@/lib/tenant";
 import { loadInsights } from "@/lib/insights";
 import { defaultRange } from "@/lib/analytics";
-import { fmtMoney, fmtNum, fmtPct, fmtRatio } from "@/lib/kpi";
+import { conversionTile, fmtMoney, fmtNum, fmtPct, fmtRatio } from "@/lib/kpi";
 import { Alert, Badge, Card, EmptyState, LinkButton, PageHeader, StatTile, TableWrap, Td, Th, fmtDate, type Tone } from "@/components/ui";
 import { Funnel, LineChart } from "@/components/charts";
 import { InlineAction } from "@/components/forms";
@@ -87,7 +87,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
         <StatTile label="CPC" value={fmtMoney(k.cpc, cur)} />
         <StatTile label="Leads" value={fmtNum(k.leads)} />
         <StatTile label="CPL" value={fmtMoney(k.cpl, cur)} hint={a.unattributed.leads > 0 ? "global : inclut les leads non attribués" : undefined} />
-        <StatTile label="Taux de conversion" value={fmtPct(k.cvr)} hint="leads ÷ clics" />
+        <StatTile {...conversionTile(k, a.attributedKpis, a.unattributed.leads)} />
         <StatTile label="Prospects qualifiés" value={fmtNum(k.qualifiedLeads)} hint={k.qualificationRate !== null ? `${fmtPct(k.qualificationRate, 0)} des leads` : undefined} />
         <StatTile label="Clients" value={fmtNum(k.customers)} />
         <StatTile label="CAC" value={fmtMoney(k.cac, cur)} tone={k.cac !== null && ctx.workspace.maxCac && k.cac > ctx.workspace.maxCac ? "red" : undefined} hint={ctx.workspace.maxCac ? `max visé : ${fmtMoney(ctx.workspace.maxCac, cur)}` : undefined} />

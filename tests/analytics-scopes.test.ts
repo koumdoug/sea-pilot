@@ -104,7 +104,9 @@ describe("recommandations de scaling : la marge vient de l'offre de la campagne 
     const s = await setup(28, 5000);
     expect(await types(s.workspaceId)).toEqual(["revenue_signal"]);
     const sig = (await loadInsights(s.workspaceId, range())).recommendations.find((r) => r.type === "revenue_signal")!;
-    expect(sig.problem).toMatch(/marge de sécurité non définie ; scaling non recommandé/);
+    expect(sig.problem).toMatch(/la marge brute couvre les dépenses publicitaires de cette campagne/); // lot 3A : nouvelle formulation du cas B
+    expect(sig.problem).toMatch(/Échantillon insuffisant/); // la réserve d'échantillon (5 leads) reste une phrase distincte
+    expect(sig.priority).toBe("low");
   });
   it("marge 28 % et ROAS 3,2 : pas de scaling, signal sous le seuil de rentabilité", async () => {
     const s = await setup(28, 3200);

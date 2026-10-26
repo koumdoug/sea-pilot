@@ -120,3 +120,17 @@ export const fmtDec = (n: number, digits = 1) => new Intl.NumberFormat("fr-FR", 
 export const fmtPct = (n: number | null, digits = 1) => (n === null ? "—" : `${fmtDec(n * 100, digits)} %`);
 export const fmtMoney = (n: number | null, currency = "EUR") => (n === null ? "—" : fmt(n, currency));
 export const fmtRatio = (n: number | null) => (n === null ? "—" : fmtDec(n, 2));
+
+/**
+ * Tuile « taux de conversion » : le taux affiché est GLOBAL (leads ÷ clics, leads et clics sans campagne inclus) ; il est libellé comme tel.
+ * Quand des leads n'ont pas de campagne, le taux rattaché aux campagnes est affiché à côté pour que les deux périmètres ne soient pas confondus.
+ */
+export function conversionTile(global: Kpis, attributed: Kpis | null, unattributedLeads: number): { label: string; value: string; hint: string } {
+  const base = "leads ÷ clics";
+  const showAttributed = unattributedLeads > 0 && attributed !== null && attributed.cvr !== null;
+  return {
+    label: "Taux de conversion (global)",
+    value: fmtPct(global.cvr),
+    hint: showAttributed ? `${base}, tous leads confondus (dont ceux sans campagne) · rattaché aux campagnes : ${fmtPct(attributed.cvr)}` : base,
+  };
+}

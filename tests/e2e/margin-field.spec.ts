@@ -317,3 +317,36 @@ test("R18. tableau de bord : taux de conversion libellé « global » et taux ra
   await expect(page.getByText(/rattaché aux campagnes : 5,0 %/)).toBeVisible();
   await expect(page.getByText("Taux de conversion", { exact: true }), "l'ancien libellé ambigu a disparu").toHaveCount(0);
 });
+
+// R10 : montants à la française sur les pages concernées. Données de test isolées : base e2e.db dédiée (recréée à chaque exécution), même compte que ci-dessus.
+test("R10. montants : format français à deux chiffres (portefeuille, produit, prospect), « — » si absent, coût IA à quatre décimales", async () => {
+  await ensureLoggedIn();
+  await setOnboardingDone(true);
+  const ws = await db.workspace.findFirstOrThrow({ where: { name: U.company } });
+  const product = await db.product.create({ data: { workspaceId: ws.id, slug: `r10-${stamp}`, name: "Produit R10" } });
+  const prospect = await db.prospect.create({ data: { workspaceId: ws.id, productId: product.id, name: "Prospect R10", dedupeKey: `r10-${stamp}`, source: "Test", collectedAt: new Date() } });
+  const ev = { workspaceId: ws.id, productId: product.id, prospectId: prospect.id, occurredAt: new Date() };
+  await db.productEvent.create({ data: { ...ev, type: "payment_confirmed", amount: 12.5, currency: "EUR", dedupeKey: `r10-pay-${stamp}` } });
+  await db.productEvent.create({ data: { ...ev, type: "demo", amount: null, currency: null, dedupeKey: `r10-demo-${stamp}` } });
+  await db.aIGeneration.create({ data: { workspaceId: ws.id, kind: "ad_copy", status: "ok", provider: "test", model: "m", promptTokens: 10, completionTokens: 5, costUsd: 0.0012 } });
+
+  await page.goto("/portfolio");
+  await expect(page.getByText(/12,50 EUR/).first()).toBeVisible();
+  await expect(page.getByText(/12\.50/)).toHaveCount(0);
+
+  await page.goto(`/products/${product.id}`);
+  await expect(page.getByText(/12,50 EUR/).first()).toBeVisible(); // tuile « Payants » et tableau des événements
+  await expect(page.getByText(/12\.50/)).toHaveCount(0);
+  const rows = page.getByRole("table", { name: "Conversions récentes" }).locator("tbody tr"); // la page contient d'autres tableaux
+  await expect(rows).toHaveCount(2);
+  await expect(rows.filter({ hasText: "12,50 EUR" })).toHaveCount(1);
+  await expect(rows.filter({ hasNotText: "12,50 EUR" })).toContainText("—"); // valeur absente : toujours « — »
+
+  await page.goto(`/prospects/${prospect.id}`);
+  await expect(page.getByText(/12,50 EUR/).first()).toBeVisible();
+  await expect(page.getByText(/12\.50/)).toHaveCount(0);
+
+  await page.goto("/ai-studio");
+  await expect(page.getByText(/≈ 0,0012 \$/)).toBeVisible(); // quatre décimales conservées, dollar conservé
+  await expect(page.getByText(/0\.0012/)).toHaveCount(0);
+});

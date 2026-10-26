@@ -5,6 +5,7 @@ import { requireCtx } from "@/lib/tenant";
 import { Alert, Badge, Card, EmptyState, PageHeader, Section, StatTile, TableWrap, Td, Th, fmtDate, type Tone } from "@/components/ui";
 import { ActionForm, CheckField, InlineAction, SubmitButton, TextField } from "@/components/forms";
 import { portfolioStats } from "@/lib/portfolio/service";
+import { fmtAmount } from "@/lib/kpi";
 import { CHANNEL_LABEL, OUTREACH_CHANNELS, PRODUCT_STATUS_LABEL } from "@/lib/portfolio/rules";
 import { initCatalogAction, saveChannelAction } from "./actions";
 
@@ -46,7 +47,7 @@ export default async function PortfolioPage() {
             <StatTile label="Prospects attribués" value={total((s) => s.prospectsTotal)} hint={noProduct ? `${noProduct} sans produit` : undefined} />
             <StatTile label="Inscriptions / essais" value={total((s) => (s.events.signup ?? 0) + (s.events.trial_started ?? 0))} hint="saisis manuellement" />
             <StatTile label="Paiements confirmés" value={total((s) => s.events.payment_confirmed ?? 0)}
-              hint={revenueByCurrency.size ? [...revenueByCurrency].map(([c, a]) => `${a.toFixed(2)} ${c}`).join(" · ") : "aucun montant saisi"} />
+              hint={revenueByCurrency.size ? [...revenueByCurrency].map(([c, a]) => fmtAmount(a, c)).join(" · ") : "aucun montant saisi"} />
           </div>
           <p className="mb-4 text-xs text-slate-500">Les dépenses marketing ne sont pas rattachées aux produits : elles ne sont affichées que si une campagne publicitaire est liée à un produit.</p>
 

@@ -6,6 +6,7 @@ import { requireCtx } from "@/lib/tenant";
 import { Alert, Badge, Card, EmptyState, KeyValue, PageHeader, Section, StatTile, TableWrap, Td, Th, fmtDate, type Tone } from "@/components/ui";
 import { ActionForm, CheckField, InlineAction, SelectField, SubmitButton, TextAreaField, TextField } from "@/components/forms";
 import { portfolioStats } from "@/lib/portfolio/service";
+import { fmtAmount } from "@/lib/kpi";
 import { CHANNEL_LABEL, EVENT_LABEL, EVENT_TYPES, OUTREACH_CHANNELS, PRODUCT_STATUSES, PRODUCT_STATUS_LABEL, PROSPECT_STATUS_LABEL } from "@/lib/portfolio/rules";
 import type { ProductFeature, ProductObjection, ProductPricing, ProductArgument } from "@/lib/portfolio/catalog";
 import {
@@ -54,7 +55,7 @@ export default async function ProductPage({ params }: { params: Promise<{ id: st
         <StatTile label="Leads entrants" value={stats?.inboundLeads ?? 0} />
         <StatTile label="Essais" value={stats?.events.trial_started ?? 0} />
         <StatTile label="Démos" value={stats?.events.demo ?? 0} />
-        <StatTile label="Payants" value={stats?.events.payment_confirmed ?? 0} hint={stats?.revenue.length ? stats.revenue.map((r) => `${r.amount.toFixed(2)} ${r.currency}`).join(" · ") : undefined} />
+        <StatTile label="Payants" value={stats?.events.payment_confirmed ?? 0} hint={stats?.revenue.length ? stats.revenue.map((r) => fmtAmount(r.amount, r.currency)).join(" · ") : undefined} />
       </div>
 
       <Section title="Fiche produit" description="Informations vérifiables uniquement. Ce qui n'est pas confirmé reste listé dans « à confirmer ».">
@@ -199,7 +200,7 @@ export default async function ProductPage({ params }: { params: Promise<{ id: st
         {events.length === 0 ? <p className="mb-3 text-sm text-slate-500">Aucune conversion enregistrée.</p> : (
           <TableWrap caption="Conversions récentes">
             <thead><tr><Th>Date</Th><Th>Type</Th><Th>Prospect</Th><Th>Montant</Th><Th>Source</Th></tr></thead>
-            <tbody>{events.map((e) => <tr key={e.id}><Td>{fmtDate(e.occurredAt)}</Td><Td>{EVENT_LABEL[e.type]}</Td><Td>{e.prospect?.name ?? e.externalRef ?? "—"}</Td><Td>{e.amount != null ? `${e.amount.toFixed(2)} ${e.currency ?? ""}` : "—"}</Td><Td>{e.source === "manual" ? "Saisie manuelle" : "Webhook"}</Td></tr>)}</tbody>
+            <tbody>{events.map((e) => <tr key={e.id}><Td>{fmtDate(e.occurredAt)}</Td><Td>{EVENT_LABEL[e.type]}</Td><Td>{e.prospect?.name ?? e.externalRef ?? "—"}</Td><Td>{e.amount != null ? fmtAmount(e.amount, e.currency) : "—"}</Td><Td>{e.source === "manual" ? "Saisie manuelle" : "Webhook"}</Td></tr>)}</tbody>
           </TableWrap>
         )}
         {canWrite && (

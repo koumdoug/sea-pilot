@@ -6,6 +6,7 @@ import { requireCtx } from "@/lib/tenant";
 import { Alert, Badge, Card, KeyValue, PageHeader, Section, TableWrap, Td, Th, fmtDate } from "@/components/ui";
 import { ActionForm, CheckField, InlineAction, SelectField, SubmitButton, TextAreaField, TextField } from "@/components/forms";
 import { checkEligibility } from "@/lib/portfolio/service";
+import { fmtAmount } from "@/lib/kpi";
 import { CHANNEL_LABEL, EVENT_LABEL, EVENT_TYPES, LEGAL_BASIS_LABEL, OUTREACH_CHANNELS, PROSPECT_STATUS_LABEL } from "@/lib/portfolio/rules";
 import { attachToCampaignAction, eraseProspectAction, logContactAction, logReplyAction, optOutAction, reassignAction, recordEventAction } from "../../portfolio/actions";
 
@@ -120,7 +121,7 @@ export default async function ProspectPage({ params }: { params: Promise<{ id: s
 
       <Section title="Conversions">
         {events.length > 0 && (
-          <ul className="mb-3 text-sm">{events.map((e) => <li key={e.id}>{fmtDate(e.occurredAt)} · {EVENT_LABEL[e.type]} · {name.get(e.productId)}{e.amount != null ? ` · ${e.amount.toFixed(2)} ${e.currency ?? ""}` : ""}</li>)}</ul>
+          <ul className="mb-3 text-sm">{events.map((e) => <li key={e.id}>{fmtDate(e.occurredAt)} · {EVENT_LABEL[e.type]} · {name.get(e.productId)}{e.amount != null ? ` · ${fmtAmount(e.amount, e.currency)}` : ""}</li>)}</ul>
         )}
         {canWrite && p.productId && (
           <ActionForm action={recordEventAction} resetOnSuccess>

@@ -117,6 +117,8 @@ export function fmt(n: number, currency = "EUR"): string {
 export const fmtNum = (n: number) => new Intl.NumberFormat("fr-FR").format(Math.round(n));
 /** Nombre à la française (virgule décimale, espace pour les milliers) avec un nombre fixe de décimales. */
 export const fmtDec = (n: number, digits = 1) => new Intl.NumberFormat("fr-FR", { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(n);
+/** Montant à la française avec la devise en suffixe (« 12,50 EUR ») ; valeur absente ou non finie : « — ». */
+export const fmtAmount = (amount: number | null | undefined, currency?: string | null, digits = 2) => (amount == null || !Number.isFinite(amount) ? "—" : `${fmtDec(amount, digits)}${currency ? ` ${currency}` : ""}`);
 export const fmtPct = (n: number | null, digits = 1) => (n === null ? "—" : `${fmtDec(n * 100, digits)} %`);
 export const fmtMoney = (n: number | null, currency = "EUR") => (n === null ? "—" : fmt(n, currency));
 export const fmtRatio = (n: number | null) => (n === null ? "—" : fmtDec(n, 2));

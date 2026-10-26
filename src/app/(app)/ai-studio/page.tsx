@@ -11,6 +11,7 @@ import { defaultOfferId, selectableOffers } from "@/lib/offer-choices";
 import { CopyButton } from "@/components/copy-button";
 import { adBadge } from "@/lib/price-guard";
 import { adAmountChecks } from "@/lib/ad-amounts";
+import { fmtDec } from "@/lib/kpi";
 import { deleteAdAction, duplicateAdAction, generateAdsAction, toggleWinnerAction, updateAdAction } from "./actions";
 
 export const metadata: Metadata = { title: "AI Studio" };
@@ -109,7 +110,7 @@ export default async function AiStudioPage({ searchParams }: { searchParams: Pro
 
       <Section title="Historique des générations" description="Chaque appel est journalisé : fournisseur, modèle, jetons et coût estimé (si les tarifs sont configurés).">
         {gens.length === 0 ? <p className="text-sm text-slate-500">Aucune génération.</p> : (
-          <ul className="divide-y divide-slate-100 text-sm">{gens.map((g) => <li key={g.id} className="flex flex-wrap justify-between gap-2 py-1.5"><span>{fmtDate(g.createdAt, true)} · {g.provider}/{g.model}</span><span className="text-slate-600">{g.status === "ok" ? `${g.promptTokens + g.completionTokens} jetons${g.costUsd != null ? ` · ≈ ${g.costUsd.toFixed(4)} $` : ""}` : <span className="text-red-700">Échec</span>}</span></li>)}</ul>
+          <ul className="divide-y divide-slate-100 text-sm">{gens.map((g) => <li key={g.id} className="flex flex-wrap justify-between gap-2 py-1.5"><span>{fmtDate(g.createdAt, true)} · {g.provider}/{g.model}</span><span className="text-slate-600">{g.status === "ok" ? `${g.promptTokens + g.completionTokens} jetons${g.costUsd != null ? ` · ≈ ${fmtDec(g.costUsd, 4)} $` : ""}` : <span className="text-red-700">Échec</span>}</span></li>)}</ul>
         )}
       </Section>
       <p className="text-xs text-slate-500"><Link href="/campaigns" className="underline">Retour aux campagnes</Link></p>

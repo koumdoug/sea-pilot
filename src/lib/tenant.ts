@@ -6,7 +6,7 @@ import { requireUser, type SessionUser } from "./auth";
 import { WORKSPACE_COOKIE } from "./constants";
 import { assertCan, can, type Action } from "./permissions";
 import { entitlement, exemptEntitlement, type Entitlement } from "./plans";
-import { isFreeOwner } from "./free-access";
+import { isFreeOwner, isExemptWorkspace } from "./free-access";
 
 export type Ctx = {
   user: SessionUser;
@@ -37,11 +37,13 @@ export async function getCtx(): Promise<Ctx | null> {
   const pref = (await cookies()).get(WORKSPACE_COOKIE)?.value;
   const m = await resolveWorkspaceFor(user.id, pref);
   if (!m) return null;
-  return buildCtx(user, m.workspace, m.role, m.workspace.subscription);
+  // Même règle que les API et quotas : l'espace est exempté s'il appartient à un propriétaire listé (tous ses membres y travaillent).
+  const exempt = isFreeOwner(user.id, m.role) || (await isExemptWorkspace(m.workspaceId));
+  return buildCtx(user, m.workspace, m.role, m.workspace.subscription, exempt);
 }
 
-export function buildCtx(user: SessionUser, workspace: Workspace, role: string, subscription: Subscription | null): Ctx {
-  return { user, workspace, workspaceId: workspace.id, role, subscription, ent: isFreeOwner(user.id, role) ? exemptEntitlement() : entitlement(subscription), can: (a) => can(role, a) };
+export function buildCtx(user: SessionUser, workspace: Workspace, role: string, subscription: Subscription | null, exempt = isFreeOwner(user.id, role)): Ctx {
+  return { user, workspace, workspaceId: workspace.id, role, subscription, ent: exempt ? exemptEntitlement() : entitlement(subscription), can: (a) => can(role, a) };
 }
 
 type RequireOpts = { action?: Action; allowInactive?: boolean; allowIncompleteOnboarding?: boolean };

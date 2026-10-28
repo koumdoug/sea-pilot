@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { redirect } from "next/navigation";
 import { requireCtx } from "@/lib/tenant";
 import { env } from "@/lib/env";
 import { PLANS, UNLIMITED, comparePlans, type PlanLimits } from "@/lib/plans";
@@ -16,6 +17,8 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
   const ctx = await requireCtx({ allowInactive: true });
   const sp = await searchParams;
   const e = ctx.ent;
+  // Le paramètre d'URL ne décide JAMAIS de l'accès : seul l'état serveur (ctx.ent) compte. Un lien « blocked » périmé (accès rétabli, propriétaire exempté) est nettoyé.
+  if (sp.blocked && e.active) redirect("/billing");
   const sub = ctx.subscription;
   const usage = await workspaceUsage(ctx.workspaceId);
   const owner = ctx.can("manage_billing");
@@ -25,7 +28,7 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
   return (
     <>
       <PageHeader title="Facturation" subtitle="Plan, essai, abonnement et usage de votre espace." />
-      {sp.blocked && <div className="mb-4"><Alert tone="warning" title="Accès suspendu">{e.reason ?? "Votre abonnement n'est plus actif."} Les leads reçus par vos pages publiques continuent d'être enregistrés ; vous y accéderez dès la réactivation.</Alert></div>}
+      {sp.blocked && !e.active && <div className="mb-4"><Alert tone="warning" title="Accès suspendu">{e.reason ?? "Votre abonnement n'est plus actif."} Les leads reçus par vos pages publiques continuent d'être enregistrés ; vous y accéderez dès la réactivation.</Alert></div>}
       {sp.success && <div className="mb-4"><Alert tone="success">Paiement reçu. L'activation de l'abonnement est confirmée par Stripe en quelques secondes : actualisez la page si besoin.</Alert></div>}
       {sp.canceled && <div className="mb-4"><Alert tone="info">Paiement annulé : aucun prélèvement n'a été effectué.</Alert></div>}
 

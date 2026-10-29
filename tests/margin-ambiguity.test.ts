@@ -34,9 +34,9 @@ describe("roasFloorForMargin : aucun point mort trompeur", () => {
 
 describe("buildStrategy : marge brute et affirmations de perte", () => {
   for (const m of [0.28, 0.3]) {
-    it(`marge ambiguë ${m}, prix 1 000, CAC maximal 130 : aucune « marge brute par vente », aucune alerte « déficitaire »`, () => {
+    it(`marge ambiguë ${m}, prix 1 000, CAC maximal 130 : aucune marge brute chiffrée (« Données insuffisantes »), aucune alerte « déficitaire »`, () => {
       const s = strategy(m);
-      expect(grossLine(s), JSON.stringify(s.economics)).toBeUndefined();
+      expect(grossLine(s)?.value, JSON.stringify(s.economics)).toBe("Données insuffisantes"); // plus aucune valeur chiffrée : la ligne dit explicitement que la donnée manque
       expect(s.funnel.profitPerSale).toBeNull();
       expect(alertText(s)).not.toMatch(/déficitaire|marge brute par vente/i);
       expect(alertText(s)).not.toMatch(/2,80|2,8 /);
@@ -49,14 +49,14 @@ describe("buildStrategy : marge brute et affirmations de perte", () => {
   it("marge absente ou nulle : aucune marge brute ; signalée manquante (comportement existant)", () => {
     for (const m of [undefined, null, 0]) {
       const s = strategy(m);
-      expect(grossLine(s), String(m)).toBeUndefined();
+      expect(grossLine(s)?.value, String(m)).toBe("Données insuffisantes");
       expect(s.missing.join(" | "), String(m)).toMatch(/marge approximative/);
       expect(alertText(s), String(m)).not.toMatch(/déficitaire/);
     }
   });
   it("marge invalide 150 : aucune marge brute supérieure au prix, aucune alerte financière sur cette base", () => {
     const s = strategy(150);
-    expect(grossLine(s), JSON.stringify(s.economics)).toBeUndefined();
+    expect(grossLine(s)?.value, JSON.stringify(s.economics)).toBe("Données insuffisantes"); // plus aucune valeur chiffrée : la ligne dit explicitement que la donnée manque
     expect(s.funnel.profitPerSale).toBeNull();
     expect(alertText(s)).not.toMatch(/déficitaire/);
   });

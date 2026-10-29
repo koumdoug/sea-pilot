@@ -111,7 +111,7 @@ test.describe.serial("parcours client SEA Pilot", () => {
     await expect(page.getByRole("heading", { name: "Est-ce que mon acquisition fonctionne ?" })).toBeVisible();
     await expect(page.getByText("Données insuffisantes").first()).toBeVisible();
     await expect(page.getByText("Pas encore de données sur la période")).toBeVisible();
-    await expect(page.getByText("Essai gratuit :")).toBeVisible();
+    await expect(page.getByText(/Essai gratuit — \d+ jours? restants?/)).toBeVisible();
     const cpl = page.locator("div", { hasText: /^CPL—/ }).first();
     await expect(cpl).toBeVisible();
   });

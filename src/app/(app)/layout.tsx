@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { requireCtx } from "@/lib/tenant";
 import { AppShell } from "@/components/app-shell";
 import { logoutAction } from "../(auth)/actions";
+import { accessBanner } from "@/lib/access-banner";
 
 export const dynamic = "force-dynamic";
 
@@ -11,11 +12,8 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   const unread = await db.notification.count({ where: { workspaceId: ctx.workspaceId, readAt: null } });
   const e = ctx.ent;
 
-  let banner: React.ReactNode = null;
-  if (e.state === "trial") banner = <Banner tone="info">Essai gratuit : <strong>{e.daysLeft} jour(s) restant(s)</strong> sur le plan {e.plan.name}. <Link href="/billing" className="font-semibold underline">Choisir un plan</Link></Banner>;
-  else if (e.state === "past_due") banner = <Banner tone="warn">{e.reason} <Link href="/billing" className="font-semibold underline">Gérer la facturation</Link></Banner>;
-  else if (e.state === "canceling") banner = <Banner tone="info">Votre abonnement prend fin dans {e.daysLeft} jour(s). <Link href="/billing" className="font-semibold underline">Le reprendre</Link></Banner>;
-  else if (!e.active) banner = <Banner tone="warn">{e.reason} <Link href="/billing" className="font-semibold underline">Voir les plans</Link></Banner>;
+  const b = accessBanner(e);
+  const banner: React.ReactNode = b ? <Banner tone={b.tone}>{b.lead}{b.strong && <strong>{b.strong}</strong>}{b.rest}<Link href={b.cta.href} className="ml-2 font-semibold underline">{b.cta.label}</Link></Banner> : null;
 
   return (
     <AppShell

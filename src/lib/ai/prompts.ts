@@ -113,12 +113,21 @@ export const strategyNarrativeSchema = z.object({
   channelRationale: z.array(z.object({ platform: str, why: str })).default([]),
   risks: strs,
   firstSteps: strs,
+  // Hypothèses de positionnement déduites des seules données fournies (affichées comme hypothèses à valider) et informations manquantes à demander.
+  differentiationHypotheses: strs,
+  advantageHypotheses: strs,
+  objectionHypotheses: strs,
+  missingInfo: strs,
 });
 export type StrategyNarrative = z.infer<typeof strategyNarrativeSchema>;
 export function strategyNarrativePrompt(i: unknown) {
   return `À partir de la fiche stratégique chiffrée ci-dessous (calculs réalisés par SEA Pilot, ne les modifie pas), rédige un résumé, la justification des canaux recommandés, les risques et les 5 premières actions.
+Le produit ou service à promouvoir est EXACTEMENT celui décrit dans « context » et « positioning » (secteur, description de l'activité, description de l'offre, public, mode de facturation s'il est connu). SEA Pilot n'est que l'outil utilisé par l'entreprise : ne décris pas son offre comme une plateforme de marketing ou d'acquisition, sauf si ces données le disent. Si la nature de l'offre n'est pas claire dans les données, dis-le dans « missingInfo » au lieu de la deviner.
+Les marges et coûts : « Données insuffisantes » signifie inconnu — ne propose aucune marge, aucun coût ni aucune valeur vie client. Une marge « estimée » reste une estimation de l'utilisateur. N'invente aucun concurrent ni aucune statistique.
+Canaux : justifie uniquement ceux listés dans « channels » (payants et organiques) ; leur répartition est une hypothèse, pas une performance observée.
+Positionnement : propose, UNIQUEMENT à partir des données fournies (offre, public, problème, proposition de valeur, fonctionnalités « verifiedFeatures »), des hypothèses de différenciation (differentiationHypotheses), d'avantages (advantageHypotheses) et d'objections probables avec une piste de réponse (objectionHypotheses). Ce sont des hypothèses à valider : n'affirme JAMAIS qu'une fonctionnalité existe si elle n'est pas dans « verifiedFeatures » ; les éléments de « unverifiedFeatures » restent à confirmer. Si les données sont insuffisantes pour une rubrique, laisse-la vide et formule dans « missingInfo » la question à poser à l'utilisateur.
 ${wrap("fiche", i)}
-Format JSON : {"summary","channelRationale":[{"platform","why"}],"risks":[],"firstSteps":[]}`;
+Format JSON : {"summary","channelRationale":[{"platform","why"}],"risks":[],"firstSteps":[],"differentiationHypotheses":[],"advantageHypotheses":[],"objectionHypotheses":[],"missingInfo":[]}`;
 }
 
 // ── Qualification IA (enrichissement) ──

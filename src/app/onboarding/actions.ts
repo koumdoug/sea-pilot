@@ -6,7 +6,7 @@ import { db } from "@/lib/db";
 import { audit } from "@/lib/audit";
 import { run, parse, formObject, optNum, optStr, type ActionState, UserError, withSubmittedValues } from "@/lib/action";
 import { buildStrategy } from "@/lib/strategy";
-import { generateStrategyNarrative } from "@/lib/strategy-service";
+import { generateStrategyNarrative, loadStrategyInput } from "@/lib/strategy-service";
 import { COMPANY_SIZES, CURRENCIES, LANGUAGES } from "@/lib/constants";
 import { createWorkspace } from "@/lib/workspaces";
 import { marginInputError } from "@/lib/margin";
@@ -58,7 +58,7 @@ export async function completeOnboardingAction(_: ActionState, fd: FormData): Pr
     const goals = { leadsPerMonth: d.goalLeadsPerMonth, salesPerMonth: d.goalSalesPerMonth, adBudgetMonthly: d.adBudgetMonthly, maxCac: d.maxCac, revenueGoal: d.revenueGoal };
     if (goals.leadsPerMonth && goals.salesPerMonth && goals.salesPerMonth > goals.leadsPerMonth) throw new UserError("L'objectif de ventes ne peut pas dépasser l'objectif de leads.");
 
-    const { offer, audience } = await db.$transaction(async (tx) => {
+    await db.$transaction(async (tx) => {
       await tx.workspace.update({
         where: { id: ctx.workspaceId },
         data: {
@@ -68,18 +68,15 @@ export async function completeOnboardingAction(_: ActionState, fd: FormData): Pr
         },
       });
       const aud = await tx.audience.create({ data: { workspaceId: ctx.workspaceId, name: d.customerType, type: d.audienceType, customerType: d.customerType, location: d.location, needs: d.needs, problems: d.problems, objections: d.objections } });
-      const off = await tx.offer.create({
+      await tx.offer.create({
         data: { workspaceId: ctx.workspaceId, audienceId: aud.id, name: d.offerName, description: d.description, price: d.price, currency: d.currency, marginPct: d.marginPct, geoZone: d.geoZone, advantages, differentiation: d.differentiation, status: "active" },
       });
-      return { offer: off, audience: aud };
     });
 
-    const sheet = buildStrategy({
-      companyName: d.name, currency: d.currency, industry: d.industry, country: d.country,
-      offer: { name: offer.name, price: offer.price, marginPct: offer.marginPct, advantages, differentiation: offer.differentiation, geoZone: offer.geoZone },
-      audience: { name: audience.name, type: audience.type, location: audience.location, needs: audience.needs, problems: audience.problems, objections: audience.objections },
-      goals,
-    });
+    // Même lecture que « Recalculer la fiche » : la fiche reflète exactement ce qui vient d'être enregistré (activité, offre, audience, objectifs).
+    const input = await loadStrategyInput(ctx.workspaceId);
+    if (!input) throw new UserError("Espace de travail introuvable.");
+    const sheet = buildStrategy(input);
     const narrative = await generateStrategyNarrative(ctx.workspaceId, ctx.user.id, sheet).catch(() => null);
     await db.strategy.create({ data: { workspaceId: ctx.workspaceId, content: { sheet, narrative } as object, source: narrative ? "rules+ai" : "rules" } });
     await db.workspace.update({ where: { id: ctx.workspaceId }, data: { onboardingCompletedAt: new Date() } });

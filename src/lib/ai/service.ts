@@ -11,7 +11,7 @@ import { entitlementForWorkspace } from "../free-access";
 export type GenerateParams<S extends z.ZodType> = {
   workspaceId: string;
   userId?: string | null;
-  kind: "strategy" | "research" | "offer" | "campaign" | "ad_copy" | "qualification" | "copilot";
+  kind: "strategy" | "research" | "offer" | "campaign" | "ad_copy" | "qualification" | "copilot" | "content_brief";
   campaignId?: string | null;
   system: string;
   prompt: string;

@@ -469,6 +469,46 @@ test.describe.serial("parcours client SEA Pilot", () => {
     await expect(page.getByText("Page introuvable")).toBeVisible();
   });
 
+  test("landing page FreelanceNexa : créée depuis la fiche produit, faits vérifiés seulement, lead attribué au produit avec ses UTM", async ({ browser }) => {
+    await page.goto("/portfolio");
+    await page.getByRole("link", { name: "FreelanceNexa" }).first().click();
+    await page.getByRole("button", { name: /Créer la landing page de FreelanceNexa/ }).click();
+    await expect(page).toHaveURL(/\/landing-pages\/[a-z0-9]+$/);
+    const lp = await db.landingPage.findUniqueOrThrow({ where: { id: page.url().split("/").pop()! } }); // espace de la session courante
+    const fn = await db.product.findUniqueOrThrow({ where: { id: lp.productId! } });
+    expect(fn.slug).toBe("freelancenexa");
+    expect(lp.status).toBe("draft");
+    await page.getByRole("button", { name: "Publier" }).first().click();
+    await expect(page.getByText("Publiée", { exact: true }).first()).toBeVisible();
+    await page.goto(`/products/${fn.id}`);
+    await expect(page.getByText(/Page rattachée/)).toBeVisible(); // pas de doublon : plus de bouton de création
+    await expect(page.getByRole("button", { name: /Créer la landing page de FreelanceNexa/ })).toHaveCount(0);
+
+    const ws = await db.workspace.findFirstOrThrow({ where: { id: lp.workspaceId } });
+    const ctx = await browser.newContext();
+    const pub = await ctx.newPage();
+    await pub.goto(`/p/${ws.slug}/${lp.slug}?utm_source=linkedin&utm_medium=organic&utm_campaign=lancement`);
+    await expect(pub.getByRole("heading", { level: 1 })).toContainText("Le cockpit administratif des travailleurs indépendants");
+    const body = await pub.locator("main").innerText();
+    expect(body).toContain("Essai gratuit de 30 jours");
+    expect(body).not.toMatch(/19[.,]99|CAD|témoignage|clients satisfaits/i); // aucun tarif ni preuve non confirmés
+    await expect(pub.getByRole("link", { name: "Créer mon compte FreelanceNexa" })).toHaveAttribute("href", /utm_source=seapilot/);
+    await expect(pub.locator("main").getByRole("link", { name: /politique de confidentialité/i })).toHaveAttribute("href", "/privacy");
+    await field(pub, "Nom complet").fill("Julie Tremblay");
+    await field(pub, "E-mail").fill(`julie.${stamp}@freelance.test`);
+    await pub.getByRole("button", { name: "Envoyer" }).click();
+    await expect(pub.getByText("Merci !", { exact: true })).toBeVisible();
+    await ctx.close();
+    const lead = await db.lead.findFirstOrThrow({ where: { email: `julie.${stamp}@freelance.test` } });
+    expect([lead.productId, lead.landingPageId, lead.utmSource, lead.utmMedium, lead.utmCampaign, lead.status]).toEqual([fn.id, lp.id, "linkedin", "organic", "lancement", "new"]);
+    expect(await db.productEvent.count({ where: { productId: fn.id } })).toBe(0); // un lead n'est ni une inscription ni un client
+
+    await page.goto(`/products/${fn.id}`);
+    await expect(page.getByRole("heading", { name: "Parcours d'acquisition" })).toBeVisible();
+    await page.goto("/portfolio");
+    await expect(page.getByRole("heading", { name: /Résultats par produit/ })).toBeVisible();
+  });
+
   test("abonnement : essai expiré = accès suspendu hors facturation ; session expirée = reconnexion", async () => {
     await page.goto("/dashboard");
     await db.subscription.updateMany({ where: { workspace: { memberships: { some: { user: { email: B.email } } } } }, data: { trialEndsAt: new Date(Date.now() - 86_400_000) } });

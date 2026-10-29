@@ -135,6 +135,25 @@ test.describe.serial("parcours client SEA Pilot", () => {
     const lp = await db.landingPage.findFirstOrThrow({ where: { workspaceId: ws.id } });
     state.wsSlug = ws.slug; state.pageSlug = lp.slug;
     expect(lp.status).toBe("published");
+    // diagnostic SEO : visible sur la page, la méta-description saisie est reconnue, et le JSON-LD public est en place
+    await page.goto(`/landing-pages/${lp.id}`);
+    await expect(page.getByRole("heading", { name: "Diagnostic SEO et moteurs de réponse" })).toBeVisible();
+    await expect(page.getByText(/ne mesure ni votre position dans Google/)).toBeVisible();
+    await page.getByText(/Tous les contrôles/).click();
+    await expect(page.getByText("Méta-description").last()).toBeVisible();
+    const html = await (await page.request.get(`/p/${ws.slug}/${lp.slug}`)).text();
+    expect(html).toContain('"@type":"WebPage"');
+    await page.goto("/landing-pages");
+    await expect(page.getByText(/SEO \d+\/100/).first()).toBeVisible();
+    // brief de contenu : consultation sans aucun appel IA ; IA non configurée = message honnête et repli manuel
+    await page.goto(`/landing-pages/${lp.id}/brief`);
+    await expect(page.getByRole("heading", { name: "Brief de contenu" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Faits issus de vos données" })).toBeVisible();
+    await expect(page.getByText("Aucune donnée de mots-clés ni de concurrents").first()).toBeVisible();
+    await expect(page.getByText("Configuration requise").first()).toBeVisible();
+    await expect(page.getByRole("button", { name: /Générer une proposition avec l'IA/ })).toHaveCount(0);
+    await expect(page.getByLabel("Brief au format Markdown")).toHaveValue(/# Brief de contenu/);
+    expect(await db.aIGeneration.count({ where: { workspaceId: ws.id, kind: "content_brief" } })).toBe(0);
   });
 
   test("campagne : Campaign Builder en 10 étapes jusqu'au statut prête puis active", async () => {

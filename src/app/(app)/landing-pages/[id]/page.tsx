@@ -8,6 +8,8 @@ import { requireCtx } from "@/lib/tenant";
 import { DEFAULT_CONSENT, DEFAULT_FORM_FIELDS, formFieldsSchema, pageUrl, parseSections, themeSchema } from "@/lib/landing";
 import { Alert, Badge, PageHeader, StatTile, type Tone, fmtDate } from "@/components/ui";
 import { InlineAction } from "@/components/forms";
+import { SeoDiagnostic } from "@/components/seo-diagnostic";
+import { auditLandingPage } from "@/lib/seo";
 import { LandingEditor } from "@/components/landing-editor";
 import { deletePageAction, duplicatePageAction, publishPageAction, savePageAction } from "../actions";
 
@@ -32,6 +34,7 @@ export default async function LandingEditorPage({ params }: { params: Promise<{ 
   const theme = themeSchema.safeParse(page.theme ?? {});
   const url = pageUrl(env.appUrl, ctx.workspace.slug, page.slug);
   const canWrite = ctx.can("write");
+  const audit = auditLandingPage({ name: page.name, status: page.status, seoTitle: page.seoTitle, seoDescription: page.seoDescription, ogImage: page.ogImage, canonicalUrl: page.canonicalUrl, sections: parseSections(page.sections), hasActiveForm: !!(f?.active && fields?.success), views, leads });
 
   return (
     <>
@@ -49,6 +52,7 @@ export default async function LandingEditorPage({ params }: { params: Promise<{ 
       </div>
       {page.status === "published" ? <div className="mb-5"><Alert tone="success">Page publique : <a className="break-all underline" href={url} target="_blank" rel="noopener noreferrer">{url}</a> — ajoutez <code>?utm_source=…&utm_medium=…&utm_campaign=…</code> à vos liens pour suivre l'origine des leads.</Alert></div>
         : <div className="mb-5"><Alert tone="info">Cette page n'est pas publique. Adresse après publication : <code className="break-all">{url}</code></Alert></div>}
+      <SeoDiagnostic audit={audit} briefHref={`/landing-pages/${page.id}/brief`} />
       {canWrite ? (
         <LandingEditor action={savePageAction}
           page={{ id: page.id, name: page.name, slug: page.slug, seoTitle: page.seoTitle, seoDescription: page.seoDescription, ogImage: page.ogImage, canonicalUrl: page.canonicalUrl, campaignId: page.campaignId, offerId: page.offerId, primary: theme.success ? theme.data.primary : "#2563eb", sections: parseSections(page.sections) }}

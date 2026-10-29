@@ -12,6 +12,7 @@ import { CopyButton } from "@/components/copy-button";
 import { adBadge } from "@/lib/price-guard";
 import { adAmountChecks } from "@/lib/ad-amounts";
 import { fmtDec } from "@/lib/kpi";
+import { listGeneratedBriefs } from "@/lib/content-brief-service";
 import { deleteAdAction, duplicateAdAction, generateAdsAction, toggleWinnerAction, updateAdAction } from "./actions";
 
 export const metadata: Metadata = { title: "AI Studio" };
@@ -24,6 +25,7 @@ export default async function AiStudioPage({ searchParams }: { searchParams: Pro
   if (sp.campaignId) where.campaignId = sp.campaignId;
   if (sp.platform && (AD_PLATFORMS as readonly string[]).includes(sp.platform)) where.platform = sp.platform;
   if (sp.winners === "1") where.isWinner = true;
+  const briefs = await listGeneratedBriefs(ctx.workspaceId, null, 5);
   const [ads, campaigns, offers, audiences, gens] = await Promise.all([
     db.ad.findMany({ where, orderBy: { createdAt: "desc" }, take: 60, include: { campaign: { select: { name: true, offerId: true } } } }),
     db.campaign.findMany({ where: { workspaceId: ctx.workspaceId, status: { not: "archived" } }, orderBy: { name: "asc" }, select: { id: true, name: true, offerId: true } }),
@@ -107,6 +109,12 @@ export default async function AiStudioPage({ searchParams }: { searchParams: Pro
           })}
         </ul>
       )}
+
+      <Section title="Briefs de contenu récents" description="Propositions générées depuis le diagnostic SEO d'une landing page. Ouvrez la page concernée pour générer ou relire un brief.">
+        {briefs.length === 0 ? <p className="text-sm text-slate-500">Aucun brief généré. Depuis <Link href="/landing-pages" className="underline">Landing pages</Link>, ouvrez une page puis « Préparer un brief de contenu ».</p> : (
+          <ul className="divide-y divide-slate-100 text-sm">{briefs.map((b) => <li key={b.generationId} className="flex flex-wrap justify-between gap-2 py-1.5"><Link className="font-medium text-brand-700 underline" href={`/landing-pages/${b.landingPageId}/brief`}>{b.ai.workingTitle}</Link><span className="text-slate-500">{fmtDate(b.createdAt, true)} · proposition IA</span></li>)}</ul>
+        )}
+      </Section>
 
       <Section title="Historique des générations" description="Chaque appel est journalisé : fournisseur, modèle, jetons et coût estimé (si les tarifs sont configurés).">
         {gens.length === 0 ? <p className="text-sm text-slate-500">Aucune génération.</p> : (

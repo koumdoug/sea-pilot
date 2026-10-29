@@ -3,7 +3,8 @@ import { notFound } from "next/navigation";
 import { db } from "@/lib/db";
 import { env } from "@/lib/env";
 import { getSessionUser } from "@/lib/auth";
-import { formFieldsSchema, pageUrl, parseSections, themeSchema } from "@/lib/landing";
+import { formFieldsSchema, isRenderable, pageUrl, parseSections, themeSchema } from "@/lib/landing";
+import { buildPageJsonLd } from "@/lib/seo";
 import { LandingView } from "@/components/landing-view";
 
 export const dynamic = "force-dynamic";
@@ -51,7 +52,7 @@ export default async function PublicLandingPage({ params, searchParams }: { para
   const theme = themeSchema.safeParse(page.theme ?? {});
   const sections = parseSections(page.sections);
   const title = page.seoTitle || page.name;
-  const jsonLd = { "@context": "https://schema.org", "@type": "WebPage", name: title, description: page.seoDescription ?? undefined, url: pageUrl(env.appUrl, workspace.slug, page.slug), publisher: { "@type": "Organization", name: workspace.name } };
+  const jsonLd = buildPageJsonLd({ title, description: page.seoDescription, url: pageUrl(env.appUrl, workspace.slug, page.slug), orgName: workspace.name, sections: sections.filter(isRenderable) });
 
   return (
     <>

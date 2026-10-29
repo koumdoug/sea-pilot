@@ -414,13 +414,20 @@ test.describe.serial("parcours client SEA Pilot", () => {
   test("portefeuille : catalogue à confirmer, prospect bloqué tant que le produit n'est pas commercialisé, isolation", async () => {
     await page.goto("/portfolio");
     await page.getByRole("button", { name: /Créer les fiches DriverPilot, FreelanceNexa et OperaPilot/ }).click();
-    await expect(page.getByRole("link", { name: "DriverPilot" })).toBeVisible();
-    await expect(page.getByRole("link", { name: "OperaPilot" })).toBeVisible();
-    const sub = await page.getByRole("link", { name: "FreelanceNexa" });
+    await expect(page.getByRole("link", { name: "DriverPilot" }).first()).toBeVisible();
+    await expect(page.getByRole("link", { name: "OperaPilot" }).first()).toBeVisible();
+    const sub = await page.getByRole("link", { name: "FreelanceNexa" }).first();
     await expect(sub).toBeVisible();
     // canaux désactivés par défaut
     await expect(page.getByText("Désactivé").first()).toBeVisible();
 
+    // parcours d'acquisition du produit pilote : rapport honnête (indisponible ≠ zéro), parcours bloqué sans landing page liée
+    await page.getByRole("link", { name: "DriverPilot" }).first().click();
+    await expect(page.getByRole("heading", { name: "Parcours d'acquisition" })).toBeVisible();
+    await expect(page.getByText("Produit pilote du premier parcours d'acquisition")).toBeVisible();
+    await expect(page.getByText("Parcours bloqué")).toBeVisible();
+    await expect(page.getByText(/CAC non calculable/)).toBeVisible();
+    await expect(page.getByText("Aucune landing page liée au produit").first()).toBeVisible();
     await page.goto("/prospects");
     await page.locator('select[name="productId"]').selectOption({ label: "DriverPilot" });
     await field(page, "Nom").fill("Chauffeur Test");

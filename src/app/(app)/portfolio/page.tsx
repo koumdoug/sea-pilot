@@ -6,6 +6,8 @@ import { Alert, Badge, Card, EmptyState, PageHeader, Section, StatTile, TableWra
 import { ActionForm, CheckField, InlineAction, SubmitButton, TextField } from "@/components/forms";
 import { portfolioStats } from "@/lib/portfolio/service";
 import { fmtAmount } from "@/lib/kpi";
+import { isPilotProduct } from "@/lib/portfolio/pilot";
+import { loadPortfolioFunnels } from "@/lib/portfolio/funnel";
 import { CHANNEL_LABEL, OUTREACH_CHANNELS, PRODUCT_STATUS_LABEL } from "@/lib/portfolio/rules";
 import { initCatalogAction, saveChannelAction } from "./actions";
 
@@ -26,6 +28,9 @@ export default async function PortfolioPage() {
   const total = (f: (s: (typeof stats)[number]) => number) => stats.reduce((a, s) => a + f(s), 0);
   const revenueByCurrency = new Map<string, number>();
   for (const s of stats) for (const r of s.revenue) revenueByCurrency.set(r.currency, (revenueByCurrency.get(r.currency) ?? 0) + r.amount);
+  const to = new Date(), from = new Date(to.getTime() - 30 * 86_400_000);
+  const agg = products.length ? await loadPortfolioFunnels(ctx.workspaceId, from, to) : null;
+  const cell = (v: number | null | undefined) => (v === null || v === undefined ? <span className="text-slate-500">Indisponible</span> : v);
   const noProduct = await db.prospect.count({ where: { workspaceId: ctx.workspaceId, deletedAt: null, productId: null } });
 
   return (
@@ -59,7 +64,7 @@ export default async function PortfolioPage() {
                 <li key={p.id}><Card className="h-full">
                   <div className="flex items-start justify-between gap-2">
                     <Link href={`/products/${p.id}`} className="min-w-0 break-words text-base font-semibold text-brand-700 underline">{p.name}</Link>
-                    <Badge tone={TONE[p.status]}>{PRODUCT_STATUS_LABEL[p.status]}</Badge>
+                    <span className="flex flex-wrap justify-end gap-1">{isPilotProduct(p.slug) && <Badge tone="purple">Pilote</Badge>}<Badge tone={TONE[p.status]}>{PRODUCT_STATUS_LABEL[p.status]}</Badge></span>
                   </div>
                   <p className="mt-1 text-sm text-slate-600">{p.tagline ?? "—"}</p>
                   <dl className="mt-3 grid grid-cols-3 gap-2 text-center text-sm">
@@ -72,6 +77,30 @@ export default async function PortfolioPage() {
               );
             })}
           </ul>
+
+          {agg && (
+            <Section title="Résultats par produit (30 derniers jours)" description="Mêmes règles que la page de chaque produit : « Indisponible » signifie non collecté, pas zéro. Les revenus restent séparés par devise ; aucune conversion n'est appliquée.">
+              <TableWrap caption="Résultats d'acquisition par produit">
+                <thead><tr><Th>Produit</Th><Th>Leads</Th><Th>Prospects</Th><Th>Inscriptions</Th><Th>Payants</Th><Th>Revenus</Th><Th>Dépenses</Th><Th>Coût par lead</Th></tr></thead>
+                <tbody>
+                  {agg.rows.map((r) => (
+                    <tr key={r.productId}>
+                      <Td><Link href={`/products/${r.productId}`} className="font-medium text-brand-700 underline">{r.name}</Link></Td>
+                      <Td>{cell(r.funnel.stages.find((s) => s.id === "leads")?.value)}</Td><Td>{cell(r.funnel.stages.find((s) => s.id === "prospects")?.value)}</Td>
+                      <Td>{cell(r.funnel.stages.find((s) => s.id === "signup")?.value)}</Td><Td>{cell(r.funnel.stages.find((s) => s.id === "payment_confirmed")?.value)}</Td>
+                      <Td>{r.funnel.revenue ? r.funnel.revenue.map((x) => fmtAmount(x.amount, x.currency)).join(" · ") : cell(null)}</Td>
+                      <Td>{r.funnel.spend.value === null ? cell(null) : fmtAmount(r.funnel.spend.value, r.funnel.spend.currency)}</Td>
+                      <Td>{r.funnel.cpl.value === null ? cell(null) : fmtAmount(r.funnel.cpl.value, r.funnel.spend.currency)}</Td>
+                    </tr>
+                  ))}
+                  <tr className="font-semibold">
+                    <Td>Total portefeuille</Td><Td>{cell(agg.totals.stages.leads)}</Td><Td>{cell(agg.totals.stages.prospects)}</Td><Td>{cell(agg.totals.stages.signup)}</Td><Td>{cell(agg.totals.stages.payment_confirmed)}</Td>
+                    <Td>{agg.totals.revenue ? agg.totals.revenue.map((x) => fmtAmount(x.amount, x.currency)).join(" · ") : cell(null)}</Td><Td>{agg.totals.spend === null ? cell(null) : fmtAmount(agg.totals.spend, agg.totals.spendCurrency)}</Td><Td className="text-xs font-normal text-slate-500">par produit</Td>
+                  </tr>
+                </tbody>
+              </TableWrap>
+            </Section>
+          )}
 
           <Section title="Canaux de prospection" description="Tous les canaux sont désactivés par défaut. Activer un canal n'envoie rien : les contacts restent consignés par vous, après contrôle d'éligibilité.">
             <ul className="grid gap-3 md:grid-cols-2">

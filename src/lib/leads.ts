@@ -57,7 +57,7 @@ export async function resolveCampaignId(workspaceId: string, p: { campaignId?: s
   return null;
 }
 
-/** Produit d'un lead entrant : explicite (vérifié dans l'espace) → campagne → landing page. Null si rien n'est attribué. */
+/** Produit d'un lead entrant : explicite (vérifié dans l'espace) → campagne → landing page → offre de la landing page. Null si rien n'est attribué. */
 export async function resolveProductId(workspaceId: string, p: { productId?: string | null; campaignId?: string | null; landingPageId?: string | null }): Promise<string | null> {
   if (p.productId) {
     const x = await db.product.findFirst({ where: { id: p.productId, workspaceId, deletedAt: null }, select: { id: true } });
@@ -68,8 +68,13 @@ export async function resolveProductId(workspaceId: string, p: { productId?: str
     if (c?.productId) return c.productId;
   }
   if (p.landingPageId) {
-    const lp = await db.landingPage.findFirst({ where: { id: p.landingPageId, workspaceId }, select: { productId: true } });
+    const lp = await db.landingPage.findFirst({ where: { id: p.landingPageId, workspaceId }, select: { productId: true, offerId: true } });
     if (lp?.productId) return lp.productId;
+    // Une page rattachée seulement à une offre hérite du produit de cette offre (sinon ses leads resteraient « non attribués »).
+    if (lp?.offerId) {
+      const o = await db.offer.findFirst({ where: { id: lp.offerId, workspaceId }, select: { productId: true } });
+      if (o?.productId) return o.productId;
+    }
   }
   return null;
 }

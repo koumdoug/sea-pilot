@@ -6,6 +6,12 @@ import { requireCtx } from "@/lib/tenant";
 import { Alert, Badge, Card, EmptyState, KeyValue, PageHeader, Section, StatTile, TableWrap, Td, Th, fmtDate, type Tone } from "@/components/ui";
 import { ActionForm, CheckField, InlineAction, SelectField, SubmitButton, TextAreaField, TextField } from "@/components/forms";
 import { portfolioStats } from "@/lib/portfolio/service";
+import { loadProductFunnel } from "@/lib/portfolio/funnel";
+import { acquisitionReadiness, isPilotProduct } from "@/lib/portfolio/pilot";
+import { formFieldsSchema } from "@/lib/landing";
+import { AcquisitionReport } from "@/components/acquisition-report";
+import { findProductPage } from "@/lib/portfolio/landing-service";
+import { createProductLandingAction } from "./actions";
 import { fmtAmount } from "@/lib/kpi";
 import { CHANNEL_LABEL, EVENT_LABEL, EVENT_TYPES, OUTREACH_CHANNELS, PRODUCT_STATUSES, PRODUCT_STATUS_LABEL, PROSPECT_STATUS_LABEL } from "@/lib/portfolio/rules";
 import type { ProductFeature, ProductObjection, ProductPricing, ProductArgument } from "@/lib/portfolio/catalog";
@@ -19,9 +25,11 @@ const CAMPAIGN_TONE: Record<string, Tone> = { draft: "gray", pending_approval: "
 const CAMPAIGN_LABEL: Record<string, string> = { draft: "Brouillon", pending_approval: "En attente d'approbation", active: "Active", paused: "En pause", completed: "Terminée" };
 const arr = <T,>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : []);
 
-export default async function ProductPage({ params }: { params: Promise<{ id: string }> }) {
+export default async function ProductPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ days?: string }> }) {
   const ctx = await requireCtx();
   const { id } = await params;
+  const sp = await searchParams;
+  const days = [7, 30, 90].includes(Number(sp.days)) ? Number(sp.days) : 30;
   const product = await db.product.findFirst({ where: { id, workspaceId: ctx.workspaceId, deletedAt: null } });
   if (!product) notFound();
   const [stats, prospects, templates, campaigns, events] = await Promise.all([
@@ -31,6 +39,18 @@ export default async function ProductPage({ params }: { params: Promise<{ id: st
     db.outreachCampaign.findMany({ where: { workspaceId: ctx.workspaceId, productId: id }, orderBy: { createdAt: "desc" } }),
     db.productEvent.findMany({ where: { workspaceId: ctx.workspaceId, productId: id }, orderBy: { occurredAt: "desc" }, take: 15, include: { prospect: { select: { name: true } } } }),
   ]);
+  const to = new Date(), from = new Date(to.getTime() - days * 86_400_000);
+  const productPage = await findProductPage(ctx.workspaceId, id);
+  const [funnel, linkedPages, webhookEvents, linkedAdCampaigns] = await Promise.all([
+    loadProductFunnel(ctx.workspaceId, id, from, to),
+    db.landingPage.findMany({ where: { workspaceId: ctx.workspaceId, status: { not: "archived" }, OR: [{ productId: id }, { offer: { productId: id } }] }, select: { status: true, forms: { where: { active: true }, take: 1, select: { fields: true } } } }),
+    db.productEvent.count({ where: { workspaceId: ctx.workspaceId, productId: id, source: "webhook" } }),
+    db.campaign.count({ where: { workspaceId: ctx.workspaceId, productId: id } }),
+  ]);
+  const readiness = acquisitionReadiness({
+    product, pages: linkedPages.map((p) => ({ status: p.status, hasActiveForm: !!(p.forms[0] && formFieldsSchema.safeParse(p.forms[0].fields).success) })),
+    webhookEvents, linkedAdCampaigns, approvedTemplates: stats?.approvedTemplates ?? 0,
+  });
   const canManage = ctx.can("manage_products"), canWrite = ctx.can("write"), canApprove = ctx.can("approve_outreach");
   const features = arr<ProductFeature>(product.features);
   const pricing = (product.pricing ?? { plans: [] }) as ProductPricing;
@@ -57,6 +77,16 @@ export default async function ProductPage({ params }: { params: Promise<{ id: st
         <StatTile label="Démos" value={stats?.events.demo ?? 0} />
         <StatTile label="Payants" value={stats?.events.payment_confirmed ?? 0} hint={stats?.revenue.length ? stats.revenue.map((r) => fmtAmount(r.amount, r.currency)).join(" · ") : undefined} />
       </div>
+
+      <Section title="Landing page du produit" description="Générée depuis la fiche : seuls les faits vérifiés sont affichés, aucun tarif non confirmé, aucune preuve inventée. Créée en brouillon : rien n'est publié ni envoyé.">
+        {productPage ? (
+          <p className="text-sm">Page rattachée : <Link className="font-semibold text-brand-700 underline" href={`/landing-pages/${productPage.id}`}>{productPage.name}</Link> ({productPage.status === "published" ? "publiée" : "brouillon"}).</p>
+        ) : canWrite ? (
+          <ActionForm action={createProductLandingAction}><input type="hidden" name="productId" value={product.id} /><SubmitButton pendingLabel="Création…">Créer la landing page de {product.name}</SubmitButton></ActionForm>
+        ) : <p className="text-sm text-slate-600">Aucune landing page rattachée. Votre rôle ne permet pas d'en créer.</p>}
+      </Section>
+
+      <AcquisitionReport funnel={funnel} readiness={readiness} days={days} basePath={`/products/${id}`} pilot={isPilotProduct(product.slug)} />
 
       <Section title="Fiche produit" description="Informations vérifiables uniquement. Ce qui n'est pas confirmé reste listé dans « à confirmer ».">
         {unconfirmed.length > 0 && (

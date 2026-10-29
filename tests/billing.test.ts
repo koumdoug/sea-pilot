@@ -117,8 +117,9 @@ describe("webhook Stripe → état de l'abonnement (idempotent)", () => {
     await db.subscription.update({ where: { workspaceId: w.workspaceId }, data: { stripeCustomerId: "cus_1" } });
     return w;
   }
+  let seq = 0;
   const subEvent = (workspaceId: string, over: Record<string, unknown> = {}, type = "customer.subscription.updated") => ({
-    id: "evt_x", type, data: { object: { id: "sub_1", customer: "cus_1", status: "active", cancel_at_period_end: false, current_period_end: Math.floor(Date.now() / 1000) + 30 * 86_400, metadata: { workspaceId, plan: "growth" }, items: { data: [{ price: { id: "price_growth_test" } }] }, ...over } },
+    id: `evt_${++seq}`, type, data: { object: { id: "sub_1", customer: "cus_1", status: "active", cancel_at_period_end: false, current_period_end: Math.floor(Date.now() / 1000) + 30 * 86_400, metadata: { workspaceId, plan: "growth" }, items: { data: [{ price: { id: "price_growth_test" } }] }, ...over } },
   });
 
   it("subscription.updated : plan déduit du prix, statut actif, fin de période", async () => {
@@ -128,7 +129,7 @@ describe("webhook Stripe → état de l'abonnement (idempotent)", () => {
     const s = await db.subscription.findUniqueOrThrow({ where: { workspaceId } });
     expect([s.plan, s.status, s.stripeSubscriptionId, s.cancelAtPeriodEnd]).toEqual(["growth", "active", "sub_1", false]);
     expect(entitlement(s).state).toBe("paid");
-    await handleStripeEvent(subEvent(workspaceId)); // rejouer le même événement ne change rien
+    await handleStripeEvent(subEvent(workspaceId)); // un nouvel événement identique ne change rien
     expect((await db.subscription.findUniqueOrThrow({ where: { workspaceId } })).plan).toBe("growth");
   });
 
@@ -148,11 +149,11 @@ describe("webhook Stripe → état de l'abonnement (idempotent)", () => {
 
   it("checkout.session.completed relie client et abonnement ; événement d'un client inconnu ignoré", async () => {
     const { workspaceId } = await makeWorkspace();
-    await handleStripeEvent({ id: "e", type: "checkout.session.completed", data: { object: { client_reference_id: workspaceId, customer: "cus_9", subscription: "sub_9" } } });
+    await handleStripeEvent({ id: "e_checkout", type: "checkout.session.completed", data: { object: { client_reference_id: workspaceId, customer: "cus_9", subscription: "sub_9" } } });
     const s = await db.subscription.findUniqueOrThrow({ where: { workspaceId } });
     expect([s.stripeCustomerId, s.stripeSubscriptionId]).toEqual(["cus_9", "sub_9"]);
-    expect((await handleStripeEvent({ id: "e", type: "invoice.paid", data: { object: { customer: "inconnu" } } })).handled).toBe(false);
-    expect((await handleStripeEvent({ id: "e", type: "type.inconnu", data: { object: {} } })).handled).toBe(false);
+    expect((await handleStripeEvent({ id: "e_unknown_customer", type: "invoice.paid", data: { object: { customer: "inconnu" } } })).handled).toBe(false);
+    expect((await handleStripeEvent({ id: "e_unknown_type", type: "type.inconnu", data: { object: {} } })).handled).toBe(false);
   });
 
   it("route webhook : 503 sans secret, 400 signature invalide, 200 valide", async () => {
@@ -180,6 +181,9 @@ describe("webhook Stripe → état de l'abonnement (idempotent)", () => {
     await changePaidPlan(workspaceId, "pro");
     expect(calls[0].url).toContain("/subscriptions/sub_1");
     expect(calls[1].body).toContain("items%5B0%5D%5Bprice%5D=price_pro_test");
+    // La demande à Stripe ne modifie PAS le forfait local : il change à l'événement de confirmation.
+    expect((await db.subscription.findUniqueOrThrow({ where: { workspaceId } })).plan).toBe("growth");
+    await handleStripeEvent(subEvent(workspaceId, { items: { data: [{ price: { id: "price_pro_test" } }] }, metadata: { workspaceId, plan: "pro" } }));
     expect((await db.subscription.findUniqueOrThrow({ where: { workspaceId } })).plan).toBe("pro");
     for (let i = 0; i < 5; i++) await db.landingPage.create({ data: { workspaceId, name: `P${i}`, slug: `p${i}`, sections: [] } });
     await expect(changePaidPlan(workspaceId, "starter")).rejects.toThrow(/dépasse les limites/);

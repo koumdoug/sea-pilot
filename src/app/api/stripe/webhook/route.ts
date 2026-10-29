@@ -13,7 +13,7 @@ export async function POST(req: Request) {
   try { ev = JSON.parse(payload) as StripeEvent; } catch { return Response.json({ error: "Corps invalide." }, { status: 400 }); }
   try {
     const r = await handleStripeEvent(ev);
-    return Response.json({ received: true, handled: r.handled });
+    return Response.json({ received: true, handled: r.handled, ...(r.duplicate ? { duplicate: true } : {}) });
   } catch (e) {
     log.error("stripe.webhook_error", { type: ev.type, error: errMsg(e) });
     return Response.json({ error: "Erreur de traitement." }, { status: 500 }); // Stripe réessaiera

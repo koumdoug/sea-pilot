@@ -12,7 +12,7 @@ import { entitlement } from "@/lib/plans";
 import { makeWorkspace, resetDb } from "./helpers";
 
 beforeEach(resetDb);
-afterEach(() => { vi.restoreAllMocks(); setEmailProviderForTests(null); delete process.env.STRIPE_SECRET_KEY; });
+afterEach(() => { vi.restoreAllMocks(); setEmailProviderForTests(null); delete process.env.STRIPE_SECRET_KEY; delete process.env.STRIPE_WEBHOOK_SECRET; });
 
 const fd = (o: Record<string, string>) => { const f = new FormData(); for (const [k, v] of Object.entries(o)) f.set(k, v); return f; };
 
@@ -47,6 +47,7 @@ describe("Stripe : checkout, portail, annulation, reprise (réponses simulées)"
   it("checkout : prix du plan, rattachement à l'espace, essai restant honoré uniquement s'il dépasse 48 h", async () => {
     const { workspaceId } = await makeWorkspace();
     process.env.STRIPE_SECRET_KEY = "sk_test_placeholder_not_a_real_key";
+    process.env.STRIPE_WEBHOOK_SECRET = "whsec_placeholder"; // sans secret de webhook, un paiement ne serait jamais confirmé : la souscription est refusée (Lot 6)
     const calls: { url: string; body: URLSearchParams }[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
       calls.push({ url: String(url), body: new URLSearchParams(init?.body as string) });

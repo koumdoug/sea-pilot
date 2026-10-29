@@ -81,7 +81,7 @@ export function ConfigRequired({ title = "Configuration requise", children, env 
   return (
     <Alert tone="warning" title={title}>
       {children}
-      {env && env.length > 0 && <p className="mt-1">Variables serveur à définir : {env.map((e) => <code key={e} className="mx-0.5 rounded bg-white/70 px-1 py-0.5 text-xs">{e}</code>)}</p>}
+      {env && env.length > 0 && <><p className="mt-2">Variables serveur à définir :</p><ul className="mt-1 list-disc space-y-1 pl-5">{env.map((e) => <li key={e}><code className="rounded bg-white/70 px-1 py-0.5 text-xs">{e}</code></li>)}</ul></>}
     </Alert>
   );
 }

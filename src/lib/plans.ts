@@ -28,29 +28,53 @@ export const LIMIT_LABEL: Record<keyof PlanLimits, string> = {
 /** Limites seulement informatives : affichées avec l'usage, mais jamais bloquantes (ni à la création, ni pour un changement de forfait). */
 export const INFORMATIVE_LIMITS: readonly (keyof PlanLimits)[] = ["leadsPerMonth"];
 
-export const PLANS: Record<PlanId, Plan> = {
+const fr = (n: number) => new Intl.NumberFormat("fr-FR").format(n).replace(/ | /g, " ");
+
+/** Libellé d'une limite : « 15 », « ∞ » (affichage de l'usage et du tableau comparatif). */
+export const limitText = (n: number): string => (n === UNLIMITED ? "∞" : fr(n));
+
+/**
+ * Liste des avantages d'un forfait, DÉRIVÉE de ses limites : les chiffres affichés ne peuvent donc pas diverger de ceux qui sont appliqués.
+ * `capabilities` : droits non chiffrés propres au forfait. Aucune promesse de service que le logiciel ne fournit pas.
+ */
+export function describePlan(limits: PlanLimits, capabilities: string[]): string[] {
+  const out: string[] = [];
+  out.push(`${fr(limits.members)} utilisateur${limits.members > 1 ? "s" : ""}`);
+  if (limits.activeCampaigns === UNLIMITED && limits.landingPages === UNLIMITED) out.push("Campagnes et landing pages illimitées");
+  else {
+    out.push(limits.activeCampaigns === UNLIMITED ? "Campagnes illimitées" : `${fr(limits.activeCampaigns)} campagne${limits.activeCampaigns > 1 ? "s" : ""} active${limits.activeCampaigns > 1 ? "s" : ""}`);
+    out.push(limits.landingPages === UNLIMITED ? "Landing pages illimitées" : `${fr(limits.landingPages)} landing page${limits.landingPages > 1 ? "s" : ""}`);
+  }
+  out.push(limits.leadsPerMonth === UNLIMITED ? "Leads illimités" : `${fr(limits.leadsPerMonth)} leads / mois (seuil indicatif)`);
+  if (limits.sequences === UNLIMITED) out.push("Séquences illimitées");
+  return [...out, ...capabilities];
+}
+
+/** SOURCE UNIQUE des forfaits : limites et droits. Aucune page ne répète ces valeurs ; les libellés affichés en sont dérivés (describePlan). */
+const PLAN_SPECS: Record<PlanId, { name: string; tagline: string; limits: PlanLimits; capabilities: string[] }> = {
   starter: {
-    id: "starter",
     name: "Starter",
     tagline: "Pour la petite entreprise qui démarre son acquisition.",
     limits: { members: 1, activeCampaigns: 3, landingPages: 3, leadsPerMonth: 300, aiGenerationsPerDay: 30, sequences: 1, integrations: 2, apiKeys: 1 },
-    features: ["1 utilisateur", "3 campagnes actives", "3 landing pages", "300 leads / mois (seuil indicatif)", "Qualification des leads", "Analytics et recommandations"],
+    capabilities: ["Qualification des leads", "Analytics et recommandations"],
   },
   growth: {
-    id: "growth",
     name: "Growth",
     tagline: "Pour les équipes qui veulent automatiser leurs relances et suivre leurs campagnes.",
     limits: { members: 5, activeCampaigns: 15, landingPages: 15, leadsPerMonth: 2000, aiGenerationsPerDay: 150, sequences: 10, integrations: 5, apiKeys: 5 },
-    features: ["5 utilisateurs", "15 campagnes actives", "15 landing pages", "2 000 leads / mois (seuil indicatif)", "Séquences de relance", "Toutes les intégrations"],
+    capabilities: ["Séquences de relance", "Toutes les intégrations"],
   },
   pro: {
-    id: "pro",
     name: "Pro",
     tagline: "Pour les agences et les équipes.",
     limits: { members: 25, activeCampaigns: UNLIMITED, landingPages: UNLIMITED, leadsPerMonth: UNLIMITED, aiGenerationsPerDay: 600, sequences: UNLIMITED, integrations: UNLIMITED, apiKeys: 20 },
-    features: ["25 utilisateurs", "Campagnes et landing pages illimitées", "Leads illimités", "Séquences illimitées", "Accès API"],
+    capabilities: ["Accès API"],
   },
 };
+
+export const PLANS: Record<PlanId, Plan> = Object.fromEntries(
+  (Object.keys(PLAN_SPECS) as PlanId[]).map((id) => [id, { id, name: PLAN_SPECS[id].name, tagline: PLAN_SPECS[id].tagline, limits: PLAN_SPECS[id].limits, features: describePlan(PLAN_SPECS[id].limits, PLAN_SPECS[id].capabilities) }]),
+) as Record<PlanId, Plan>;
 
 export const planOrNull = (id: string | null | undefined): Plan | null => (id && (PLAN_IDS as readonly string[]).includes(id) ? PLANS[id as PlanId] : null);
 
@@ -104,6 +128,17 @@ export function entitlement(sub: SubscriptionLike | null, now = new Date()): Ent
   }
   if (status === "canceled" || status === "expired") return { active: false, state: "canceled", plan, daysLeft: 0, reason: "Abonnement terminé. Réactivez un plan pour continuer." };
   return { active: false, state: "incomplete", plan, daysLeft: null, reason: "Abonnement incomplet." };
+}
+
+/**
+ * États dans lesquels un abonnement Stripe existe encore chez Stripe : résiliation, reprise, portail de paiement et changement de forfait y sont possibles.
+ * Un identifiant Stripe enregistré ne prouve JAMAIS qu'un abonnement est actif : « terminé », « paiement incomplet » ou « essai expiré » ne le sont pas.
+ */
+export const LIVE_SUBSCRIPTION_STATES: readonly Entitlement["state"][] = ["paid", "canceling", "past_due"];
+
+/** Règle unique (interface ET serveur) : un abonnement Stripe est lié et son état réel est vivant. */
+export function isLiveSubscription(sub: (SubscriptionLike & { stripeSubscriptionId?: string | null }) | null, now = new Date()): boolean {
+  return !!sub?.stripeSubscriptionId && LIVE_SUBSCRIPTION_STATES.includes(entitlement(sub, now).state);
 }
 
 /** Accès gratuit du propriétaire de la plateforme (liste d'exceptions serveur) : toutes les fonctions, limites du plan le plus élevé. Aucun paiement requis. */

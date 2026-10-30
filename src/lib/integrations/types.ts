@@ -49,3 +49,6 @@ export class IntegrationError extends Error {
     super(message);
   }
 }
+
+/** Limite d'intégrations du forfait atteinte : la connexion n'est pas enregistrée (le fournisseur, lui, a déjà émis l'autorisation). */
+export class IntegrationLimitError extends IntegrationError {}

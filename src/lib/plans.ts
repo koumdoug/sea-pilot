@@ -53,6 +53,9 @@ export function describePlan(limits: PlanLimits, capabilities: string[]): string
   }
   out.push(limits.leadsPerMonth === UNLIMITED ? "Leads illimités" : `${fr(limits.leadsPerMonth)} leads / mois (seuil indicatif)`);
   if (limits.sequences === UNLIMITED) out.push("Séquences illimitées");
+  else if (limits.sequences > 0) out.push(`${fr(limits.sequences)} séquence${limits.sequences > 1 ? "s" : ""}`);
+  // Une limite numérique est annoncée comme telle (jamais « toutes les intégrations » quand un nombre existe). Illimité : aucune ligne (le tableau comparatif affiche ∞).
+  if (limits.integrations !== UNLIMITED && limits.integrations > 0) out.push(`${fr(limits.integrations)} intégration${limits.integrations > 1 ? "s" : ""}`);
   return [...out, ...capabilities];
 }
 
@@ -70,7 +73,7 @@ const PLAN_SPECS: Record<PlanId, { name: string; tagline: string; limits: PlanLi
     tagline: "Pour les équipes qui veulent automatiser leurs relances et suivre leurs campagnes.",
     limits: { members: 5, activeCampaigns: 15, landingPages: 15, leadsPerMonth: 2000, aiGenerationsPerDay: 150, sequences: 10, integrations: 5, apiKeys: 0 },
     rights: { api: false },
-    capabilities: ["Séquences de relance", "Toutes les intégrations"],
+    capabilities: ["Séquences de relance"],
   },
   pro: {
     name: "Pro",

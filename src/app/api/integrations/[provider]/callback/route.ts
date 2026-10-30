@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { can } from "@/lib/permissions";
 import { PROVIDERS } from "@/lib/integrations/providers";
 import { callbackUrl, readOAuthState, saveConnection } from "@/lib/integrations/service";
+import { IntegrationLimitError } from "@/lib/integrations/types";
 import { env } from "@/lib/env";
 import { log, errMsg } from "@/lib/logger";
 
@@ -30,6 +31,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ provider
     await saveConnection(state.workspaceId, provider, r, user.id);
     return back(`connected=${provider}`);
   } catch (e) {
+    if (e instanceof IntegrationLimitError) return back("error=limit");
     log.error("integration.callback_failed", { provider, error: errMsg(e) });
     return back("error=exchange");
   }

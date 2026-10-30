@@ -4,6 +4,7 @@ import { processDueFollowUps } from "@/lib/followups";
 import { listSyncableIntegrations, syncIntegration } from "@/lib/integrations/service";
 import { log, errMsg } from "@/lib/logger";
 import { reconcileDueSubscriptions, stripeConfigured, type ReconcileSummary } from "@/lib/billing";
+import { purgeStripeEvents } from "@/lib/stripe-events";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -50,9 +51,12 @@ async function handle(req: Request) {
     try { billing = await reconcileDueSubscriptions({ budgetMs }); }
     catch (e) { log.error("cron.reconcile_failed", { error: errMsg(e) }); billing = { checked: 0, updated: 0, failed: 1, busy: 0, deferred: 0, remaining: 0, complete: false, stoppedBy: null }; }
   }
+  // Purge du registre des événements Stripe (rétention 90 jours, jamais d'événement en cours) ; une erreur de purge n'affecte rien d'autre.
+  let ledgerPurged: { processed: number; failed: number } | { skipped: true } = { skipped: true };
+  if (url.searchParams.get("purge") !== "0") { try { ledgerPurged = await purgeStripeEvents(); } catch (e) { log.warn("cron.ledger_purge_failed", { error: errMsg(e) }); } }
   const complete = syncs.deferred === 0 && ("skipped" in billing || billing.complete);
   log.info("cron.summary", { complete, syncs, billing, elapsedMs: Date.now() - startedAt });
-  return Response.json({ followups, syncs: syncs.ok + syncs.errors, syncErrors: syncs.errors, syncSkipped: { inactive: syncs.skippedInactive, overLimit: syncs.skippedOverLimit }, syncDeferred: syncs.deferred, billing, complete });
+  return Response.json({ followups, syncs: syncs.ok + syncs.errors, syncErrors: syncs.errors, syncSkipped: { inactive: syncs.skippedInactive, overLimit: syncs.skippedOverLimit }, syncDeferred: syncs.deferred, billing, ledgerPurged, complete });
 }
 
 export const GET = handle;

@@ -37,6 +37,20 @@ export async function completeStripeEvent(id: string, r: { workspaceId?: string 
   await db.stripeEvent.update({ where: { id }, data: { status: "processed", lockedUntil: null, processedAt: new Date(), workspaceId: r.workspaceId ?? null, outcome: r.outcome, note: r.note?.slice(0, 300) ?? null, error: null } });
 }
 
+/**
+ * Rétention du registre. Stripe réessaie une livraison pendant 3 jours au plus et le tableau de bord permet de renvoyer un événement jusqu'à 30 jours :
+ * un événement `processed` est donc conservé 90 jours (largement au-delà de toute rejouabilité) avant purge. Un événement `processing` n'est JAMAIS purgé
+ * (bail en cours ou reprise à venir) ; un événement `failed` est conservé 180 jours pour diagnostic puisqu'il reste repris par les réessais de Stripe.
+ */
+export const PROCESSED_EVENT_RETENTION_MS = 90 * 86_400_000;
+export const FAILED_EVENT_RETENTION_MS = 180 * 86_400_000;
+
+export async function purgeStripeEvents(now = new Date()): Promise<{ processed: number; failed: number }> {
+  const processed = await db.stripeEvent.deleteMany({ where: { status: "processed", processedAt: { lt: new Date(now.getTime() - PROCESSED_EVENT_RETENTION_MS) } } });
+  const failed = await db.stripeEvent.deleteMany({ where: { status: "failed", updatedAt: { lt: new Date(now.getTime() - FAILED_EVENT_RETENTION_MS) } } });
+  return { processed: processed.count, failed: failed.count };
+}
+
 export async function failStripeEvent(id: string, error: string) {
   await db.stripeEvent.update({ where: { id }, data: { status: "failed", lockedUntil: null, error: error.slice(0, 300) } });
 }

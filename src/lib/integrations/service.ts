@@ -9,7 +9,7 @@ import { UNLIMITED, limitReached } from "../plans";
 import { workspaceUsage } from "../billing";
 import { withWorkspaceLock } from "../quota";
 import { PROVIDERS, PROVIDER_ORDER } from "./providers";
-import { IntegrationError, type ConnectResult, type Credentials, type DateRange } from "./types";
+import { IntegrationError, IntegrationLimitError, type ConnectResult, type Credentials, type DateRange } from "./types";
 
 export type IntegrationState = "needs_config" | "disconnected" | "connected" | "error" | "expired";
 
@@ -62,7 +62,7 @@ export async function saveConnection(workspaceId: string, provider: string, r: C
     const existing = await tx.integration.findUnique({ where: { workspaceId_provider: { workspaceId, provider } } });
     if (!existing || existing.status === "disconnected") {
       const usage = await workspaceUsage(workspaceId, tx);
-      if (limitReached(plan, "integrations", usage.integrations)) throw new IntegrationError("Limite d'intégrations atteinte pour votre plan.");
+      if (limitReached(plan, "integrations", usage.integrations)) throw new IntegrationLimitError("Limite d'intégrations atteinte pour votre plan.");
     }
     return tx.integration.upsert({
       where: { workspaceId_provider: { workspaceId, provider } },

@@ -2,7 +2,7 @@ import { createHmac } from "node:crypto";
 import type { Prisma, Subscription } from "@prisma/client";
 import { db } from "./db";
 import { env } from "./env";
-import { randomToken, safeEqual } from "./crypto";
+import { randomToken, safeEqual, sha256 } from "./crypto";
 import { audit } from "./audit";
 import { PLAN_IDS, type PlanId } from "./constants";
 import { PLANS, comparePlans, downgradeBlockers, entitlement, isLiveSubscription, planOrNull, type PlanLimits } from "./plans";
@@ -84,12 +84,29 @@ export interface StripeGateway {
   listCustomerSubscriptions(customerId: string): Promise<StripeSub[]>;
   listOpenCheckoutSessions(customerId: string): Promise<{ id: string }[]>;
 }
+/**
+ * Clé d'idempotence de la création d'un client Stripe : espace ET e-mail. Stripe refuse (erreur 400) de rejouer une même clé avec d'autres paramètres pendant 24 h ;
+ * avec l'e-mail dans la clé, un changement d'adresse crée une clé distincte au lieu de bloquer l'espace, et un rejeu identique (écriture locale échouée) renvoie le même client.
+ * L'adresse n'apparaît pas en clair dans la clé (empreinte). Cas résiduel assumé : échec local PUIS changement d'adresse < 24 h = un client Stripe orphelin, sans effet.
+ */
+export const customerIdempotencyKey = (workspaceId: string, email: string) => `customer:${workspaceId}:${sha256(email.trim().toLowerCase()).slice(0, 12)}`;
+
+/** Une revue manuelle de facturation est-elle ouverte (30 jours) : second abonnement actif ou client Stripe inattendu détecté, aucune action automatique prise ? */
+export async function billingNeedsReview(workspaceId: string, now = new Date()): Promise<boolean> {
+  const since = new Date(now.getTime() - 30 * 86_400_000);
+  const [audits, events] = await Promise.all([
+    db.auditLog.count({ where: { workspaceId, action: "billing.duplicate_subscription", createdAt: { gte: since } } }),
+    db.stripeEvent.count({ where: { workspaceId, outcome: "needs_review", processedAt: { gte: since } } }),
+  ]);
+  return audits + events > 0;
+}
+
 const isNotFound = (e: unknown) => e instanceof StripeHttpError && e.status === 404;
 export const liveStripeGateway: StripeGateway = {
   async getSubscription(id) { try { return await stripe<StripeSub>("GET", `/subscriptions/${encodeURIComponent(id)}`); } catch (e) { if (isNotFound(e)) return null; throw e; } },
   async getCheckoutSession(id) { try { return await stripe<{ status: string }>("GET", `/checkout/sessions/${encodeURIComponent(id)}`); } catch (e) { if (isNotFound(e)) return null; throw e; } },
   async expireCheckoutSession(id) { await stripe("POST", `/checkout/sessions/${encodeURIComponent(id)}/expire`, {}); },
-  createCustomer: (p) => stripe<{ id: string }>("POST", "/customers", { email: p.email, "metadata[workspaceId]": p.workspaceId }, { idempotencyKey: `customer:${p.workspaceId}` }),
+  createCustomer: (p) => stripe<{ id: string }>("POST", "/customers", { email: p.email, "metadata[workspaceId]": p.workspaceId }, { idempotencyKey: customerIdempotencyKey(p.workspaceId, p.email) }),
   createCheckoutSession: (body, idempotencyKey) => stripe<{ id: string; url?: string }>("POST", "/checkout/sessions", body, { idempotencyKey }),
   async listCustomerSubscriptions(customerId) { const r = await stripe<{ data?: StripeSub[] }>("GET", `/subscriptions?customer=${encodeURIComponent(customerId)}&status=all&limit=20`); return Array.isArray(r.data) ? r.data : []; },
   async listOpenCheckoutSessions(customerId) { const r = await stripe<{ data?: { id: string }[] }>("GET", `/checkout/sessions?customer=${encodeURIComponent(customerId)}&status=open&limit=20`); return Array.isArray(r.data) ? r.data : []; },

@@ -9,7 +9,8 @@ import { destroySession, hashPassword, passwordProblem, verifyPassword } from "@
 import { run, parse, formObject, optNum, optStr, UserError, type ActionState } from "@/lib/action";
 import { COMPANY_SIZES, CURRENCIES, LANGUAGES, ROLES } from "@/lib/constants";
 import { randomToken, sha256 } from "@/lib/crypto";
-import { limitReached } from "@/lib/plans";
+import { limitReached, planAllowsApi } from "@/lib/plans";
+import { QuotaError, createWithinLimit } from "@/lib/quota";
 import { workspaceUsage } from "@/lib/billing";
 import { normalizeCriteria } from "@/lib/scoring";
 import { rateLimit } from "@/lib/rate-limit";
@@ -119,10 +120,11 @@ export async function saveQualificationAction(_: ActionState, fd: FormData): Pro
 export async function createApiKeyAction(_: ActionState, fd: FormData): Promise<ActionState> {
   return run({ action: "manage_integrations" }, async (ctx) => {
     const { name } = parse(z.object({ name: z.string().trim().min(2, "Nom requis").max(80) }), formObject(fd));
-    const usage = await workspaceUsage(ctx.workspaceId);
-    if (limitReached(ctx.ent.plan, "apiKeys", usage.apiKeys)) throw new UserError("Limite de clés API atteinte pour votre plan.");
+    if (!planAllowsApi(ctx.ent.plan)) throw new UserError("L'accès API est réservé au forfait Pro : passez à Pro dans Facturation pour créer des clés.");
     const key = `sp_${randomToken(32)}`;
-    await db.apiKey.create({ data: { workspaceId: ctx.workspaceId, name, prefix: key.slice(0, 10), keyHash: sha256(key), createdById: ctx.user.id } });
+    try {
+      await createWithinLimit({ workspaceId: ctx.workspaceId, plan: ctx.ent.plan, key: "apiKeys", message: "Limite de clés API atteinte pour votre plan.", create: (tx) => tx.apiKey.create({ data: { workspaceId: ctx.workspaceId, name, prefix: key.slice(0, 10), keyHash: sha256(key), createdById: ctx.user.id } }) });
+    } catch (e) { if (e instanceof QuotaError) throw new UserError(e.message); throw e; }
     await audit({ workspaceId: ctx.workspaceId, userId: ctx.user.id, action: "apikey.created", meta: { name } });
     revalidatePath("/settings");
     return { ok: true, message: "Clé créée. Copiez-la maintenant : elle ne sera plus jamais affichée.", data: { key } };

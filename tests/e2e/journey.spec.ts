@@ -351,6 +351,11 @@ test.describe.serial("parcours client SEA Pilot", () => {
     await expect(page.getByLabel(/Affiner avec l'IA/)).toHaveCount(0);
     await expect(page.getByText(/L'analyse par l'IA se lance manuellement depuis la fiche d'un lead/)).toBeVisible();
 
+    // L'API est comprise dans le forfait Pro seulement : sous le forfait d'essai courant, aucune clé ne peut être créée (refus côté serveur, formulaire absent).
+    await page.goto("/settings?tab=api");
+    await expect(page.getByText(/L.accès API est réservé au forfait Pro/)).toBeVisible();
+    await expect(page.getByRole("button", { name: "Créer la clé" })).toHaveCount(0);
+    await db.subscription.updateMany({ where: { workspace: { slug: state.wsSlug } }, data: { plan: "pro" } });
     await page.goto("/settings?tab=api");
     await field(page, "Nom de la clé").fill("CRM externe");
     await page.getByRole("button", { name: "Créer la clé" }).click();

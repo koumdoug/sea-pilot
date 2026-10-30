@@ -15,7 +15,13 @@ export type PlanLimits = {
   apiKeys: number;
 };
 
-export type Plan = { id: PlanId; name: string; tagline: string; limits: PlanLimits; features: string[] };
+/** Droits non chiffrés d'un forfait, appliqués côté serveur (l'interface ne fait que les afficher). */
+export type PlanRights = {
+  /** Accès à l'API publique par clé (`/api/v1/*`) : création ET utilisation des clés. */
+  api: boolean;
+};
+
+export type Plan = { id: PlanId; name: string; tagline: string; limits: PlanLimits; rights: PlanRights; features: string[] };
 
 export const UNLIMITED = -1;
 
@@ -51,30 +57,40 @@ export function describePlan(limits: PlanLimits, capabilities: string[]): string
 }
 
 /** SOURCE UNIQUE des forfaits : limites et droits. Aucune page ne répète ces valeurs ; les libellés affichés en sont dérivés (describePlan). */
-const PLAN_SPECS: Record<PlanId, { name: string; tagline: string; limits: PlanLimits; capabilities: string[] }> = {
+const PLAN_SPECS: Record<PlanId, { name: string; tagline: string; limits: PlanLimits; rights: PlanRights; capabilities: string[] }> = {
   starter: {
     name: "Starter",
     tagline: "Pour la petite entreprise qui démarre son acquisition.",
-    limits: { members: 1, activeCampaigns: 3, landingPages: 3, leadsPerMonth: 300, aiGenerationsPerDay: 30, sequences: 1, integrations: 2, apiKeys: 1 },
+    limits: { members: 1, activeCampaigns: 3, landingPages: 3, leadsPerMonth: 300, aiGenerationsPerDay: 30, sequences: 1, integrations: 2, apiKeys: 0 },
+    rights: { api: false },
     capabilities: ["Qualification des leads", "Analytics et recommandations"],
   },
   growth: {
     name: "Growth",
     tagline: "Pour les équipes qui veulent automatiser leurs relances et suivre leurs campagnes.",
-    limits: { members: 5, activeCampaigns: 15, landingPages: 15, leadsPerMonth: 2000, aiGenerationsPerDay: 150, sequences: 10, integrations: 5, apiKeys: 5 },
+    limits: { members: 5, activeCampaigns: 15, landingPages: 15, leadsPerMonth: 2000, aiGenerationsPerDay: 150, sequences: 10, integrations: 5, apiKeys: 0 },
+    rights: { api: false },
     capabilities: ["Séquences de relance", "Toutes les intégrations"],
   },
   pro: {
     name: "Pro",
     tagline: "Pour les agences et les équipes.",
     limits: { members: 25, activeCampaigns: UNLIMITED, landingPages: UNLIMITED, leadsPerMonth: UNLIMITED, aiGenerationsPerDay: 600, sequences: UNLIMITED, integrations: UNLIMITED, apiKeys: 20 },
-    capabilities: ["Accès API"],
+    rights: { api: true },
+    capabilities: [],
   },
 };
 
 export const PLANS: Record<PlanId, Plan> = Object.fromEntries(
-  (Object.keys(PLAN_SPECS) as PlanId[]).map((id) => [id, { id, name: PLAN_SPECS[id].name, tagline: PLAN_SPECS[id].tagline, limits: PLAN_SPECS[id].limits, features: describePlan(PLAN_SPECS[id].limits, PLAN_SPECS[id].capabilities) }]),
+  (Object.keys(PLAN_SPECS) as PlanId[]).map((id) => {
+    const s = PLAN_SPECS[id];
+    // « Accès API » est DÉRIVÉ du droit appliqué par le serveur : la promesse ne peut pas diverger de la règle.
+    return [id, { id, name: s.name, tagline: s.tagline, limits: s.limits, rights: s.rights, features: describePlan(s.limits, [...s.capabilities, ...(s.rights.api ? ["Accès API"] : [])]) }];
+  }),
 ) as Record<PlanId, Plan>;
+
+/** L'API publique par clé est-elle comprise dans ce forfait ? (règle unique : création des clés, appels `/api/v1/*`) */
+export const planAllowsApi = (plan: Plan): boolean => plan.rights.api;
 
 export const planOrNull = (id: string | null | undefined): Plan | null => (id && (PLAN_IDS as readonly string[]).includes(id) ? PLANS[id as PlanId] : null);
 

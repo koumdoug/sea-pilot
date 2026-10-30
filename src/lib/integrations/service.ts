@@ -4,6 +4,10 @@ import { env } from "../env";
 import { decryptJson, encryptJson, signToken, verifyToken } from "../crypto";
 import { audit } from "../audit";
 import { log, errMsg } from "../logger";
+import { entitlementForWorkspace } from "../free-access";
+import { limitReached } from "../plans";
+import { workspaceUsage } from "../billing";
+import { withWorkspaceLock } from "../quota";
 import { PROVIDERS, PROVIDER_ORDER } from "./providers";
 import { IntegrationError, type ConnectResult, type Credentials, type DateRange } from "./types";
 
@@ -51,9 +55,19 @@ export async function saveConnection(workspaceId: string, provider: string, r: C
     status: "connected", credentials: encryptJson(r.credentials), accountName: r.accountName ?? null, externalAccountId: r.externalAccountId ?? null,
     connectedAt: new Date(), lastError: null, expiresAt: r.credentials.expiresAt ? new Date(r.credentials.expiresAt) : null,
   };
-  const row = await db.integration.upsert({
-    where: { workspaceId_provider: { workspaceId, provider } },
-    create: { workspaceId, provider, ...data, config: (r.config ?? {}) as object }, update: { ...data, ...(r.config ? { config: r.config as object } : {}) },
+  // Limite du forfait appliquée ICI, point de passage commun à la connexion par clé ET au retour OAuth (callback), dans une transaction verrouillée :
+  // ni un appel direct au callback, ni deux connexions simultanées ne dépassent le nombre d'intégrations du forfait. Reconnecter une intégration existante est libre.
+  const plan = (await entitlementForWorkspace(workspaceId, await db.subscription.findUnique({ where: { workspaceId } }))).plan;
+  const row = await withWorkspaceLock(workspaceId, async (tx) => {
+    const existing = await tx.integration.findUnique({ where: { workspaceId_provider: { workspaceId, provider } } });
+    if (!existing || existing.status === "disconnected") {
+      const usage = await workspaceUsage(workspaceId, tx);
+      if (limitReached(plan, "integrations", usage.integrations)) throw new IntegrationError("Limite d'intégrations atteinte pour votre plan.");
+    }
+    return tx.integration.upsert({
+      where: { workspaceId_provider: { workspaceId, provider } },
+      create: { workspaceId, provider, ...data, config: (r.config ?? {}) as object }, update: { ...data, ...(r.config ? { config: r.config as object } : {}) },
+    });
   });
   await audit({ workspaceId, userId: actorId, action: "integration.connected", entity: "Integration", entityId: row.id, meta: { provider } });
   return row;

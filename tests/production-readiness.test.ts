@@ -9,7 +9,7 @@ import { setEmailProviderForTests, type EmailProvider, type OutgoingEmail } from
 import { verifyPassword } from "@/lib/auth";
 import { POST as apiLead } from "@/app/api/v1/leads/route";
 import { entitlement } from "@/lib/plans";
-import { makeWorkspace, resetDb } from "./helpers";
+import { makeWorkspace, resetDb, grantApiPlan } from "./helpers";
 import { deliver } from "./stripe-fake";
 
 beforeEach(resetDb);
@@ -146,6 +146,7 @@ describe("isolation : vecteurs supplémentaires", () => {
     const campB = await db.campaign.create({ data: { workspaceId: b.workspaceId, name: "Camp B" } });
     const key = "sp_iso_" + "k".repeat(24);
     await db.apiKey.create({ data: { workspaceId: a.workspaceId, name: "k", prefix: key.slice(0, 10), keyHash: sha256(key) } });
+    await grantApiPlan(a.workspaceId);
     const res = await apiLead(new Request("http://x/api/v1/leads", { method: "POST", headers: { authorization: `Bearer ${key}` }, body: JSON.stringify({ name: "N", email: "n@a.com", campaign_id: campB.id, utm_campaign: campB.id }) }));
     expect(res.status).toBe(201);
     const l = await db.lead.findFirstOrThrow({ where: { email: "n@a.com" } });

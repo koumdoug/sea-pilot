@@ -15,6 +15,9 @@ export async function resetDb() {
   await db.user.deleteMany();
 }
 
+/** L'API par clé est comprise dans le forfait Pro seulement : les tests de l'API (et non du forfait) donnent donc Pro à l'espace qui porte la clé. */
+export const grantApiPlan = (workspaceId: string) => db.subscription.update({ where: { workspaceId }, data: { plan: "pro" } });
+
 let n = 0;
 export async function makeWorkspace(name = "Acme", opts: { role?: string } = {}) {
   const i = ++n;

@@ -1,8 +1,6 @@
 import { z } from "zod";
 import { db } from "@/lib/db";
-import { sha256 } from "@/lib/crypto";
-import { rateLimit } from "@/lib/rate-limit";
-import { entitlementForWorkspace } from "@/lib/free-access";
+import { authenticateApiRequest } from "@/lib/api-access";
 import { dedupeKeyOf, EVENT_TYPES, normalizeEmail } from "@/lib/portfolio/rules";
 import { PortfolioError, recordProductEvent } from "@/lib/portfolio/service";
 
@@ -31,13 +29,9 @@ const json = (data: unknown, status = 200) => Response.json(data, { status });
  * Aucun des trois SaaS n'appelle cette route aujourd'hui : elle est prête, non connectée.
  */
 export async function POST(req: Request) {
-  const auth = req.headers.get("authorization") ?? "";
-  const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
-  if (!token.startsWith("sp_")) return json({ error: "Clé API manquante ou invalide." }, 401);
-  const key = await db.apiKey.findUnique({ where: { keyHash: sha256(token) }, include: { workspace: { include: { subscription: true } } } });
-  if (!key || key.revokedAt || key.workspace.deletedAt) return json({ error: "Clé API manquante ou invalide." }, 401);
-  if (!rateLimit(`apikey:${key.id}`, 60, 60_000).ok) return json({ error: "Limite de débit atteinte (60 requêtes/minute)." }, 429);
-  if (!(await entitlementForWorkspace(key.workspaceId, key.workspace.subscription)).active) return json({ error: "Abonnement inactif." }, 402);
+  const a = await authenticateApiRequest(req); // clé, débit, abonnement actif ET droit API du forfait (403 hors Pro) : règle serveur unique
+  if (!a.ok) return a.response;
+  const key = a.key;
 
   let b: z.infer<typeof body>;
   try { b = body.parse(JSON.parse((await req.text()).slice(0, 20_000))); } catch (e) { return json({ error: "Corps invalide.", details: e instanceof z.ZodError ? e.issues.map((i) => `${i.path.join(".")} : ${i.message}`) : undefined }, 400); }

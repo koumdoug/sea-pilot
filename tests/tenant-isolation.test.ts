@@ -9,7 +9,7 @@ import { enrollLead } from "@/lib/followups";
 import { linkAdCampaign } from "@/lib/integrations/service";
 import { sha256 } from "@/lib/crypto";
 import { POST as apiLead } from "@/app/api/v1/leads/route";
-import { makeWorkspace, resetDb } from "./helpers";
+import { makeWorkspace, resetDb, grantApiPlan } from "./helpers";
 
 beforeEach(resetDb);
 
@@ -101,6 +101,7 @@ describe("isolation multi-tenant", () => {
     const b = await makeWorkspace("B");
     const key = "sp_testkey_A_" + "x".repeat(20);
     await db.apiKey.create({ data: { workspaceId: a.workspaceId, name: "k", prefix: key.slice(0, 10), keyHash: sha256(key) } });
+    await grantApiPlan(a.workspaceId);
     const call = (k: string | null, body: unknown) => apiLead(new Request("http://x/api/v1/leads", { method: "POST", headers: { "content-type": "application/json", ...(k ? { authorization: `Bearer ${k}` } : {}) }, body: JSON.stringify(body) }));
 
     expect((await call(null, { name: "N", email: "n@x.com" })).status).toBe(401);
@@ -122,6 +123,7 @@ describe("isolation multi-tenant", () => {
     const a = await makeWorkspace("A");
     const key = "sp_testkey_inactive_" + "y".repeat(12);
     await db.apiKey.create({ data: { workspaceId: a.workspaceId, name: "k", prefix: key.slice(0, 10), keyHash: sha256(key) } });
+    await grantApiPlan(a.workspaceId);
     await db.subscription.update({ where: { workspaceId: a.workspaceId }, data: { status: "canceled" } });
     const res = await apiLead(new Request("http://x/api/v1/leads", { method: "POST", headers: { authorization: `Bearer ${key}` }, body: JSON.stringify({ name: "N", email: "n@x.com" }) }));
     expect(res.status).toBe(402);

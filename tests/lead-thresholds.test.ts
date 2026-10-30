@@ -30,7 +30,7 @@ import { DEFAULT_CONSENT, DEFAULT_FORM_FIELDS } from "@/lib/landing";
 import { PLANS, entitlement, limitReached } from "@/lib/plans";
 import { POST as apiLead } from "@/app/api/v1/leads/route";
 import { POST as publicLead } from "@/app/api/public/leads/route";
-import { makeWorkspace, resetDb } from "./helpers";
+import { makeWorkspace, resetDb, grantApiPlan } from "./helpers";
 
 beforeEach(resetDb);
 
@@ -70,6 +70,7 @@ describe("capture au-delà du seuil de leads du forfait", () => {
     const w = await starterAtThreshold();
     const key = "sp_threshold_" + "k".repeat(20);
     await db.apiKey.create({ data: { workspaceId: w.workspaceId, name: "k", prefix: key.slice(0, 10), keyHash: sha256(key) } });
+    await grantApiPlan(w.workspaceId);
     const res = await apiLead(new Request("http://x/api/v1/leads", { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${key}` }, body: JSON.stringify({ name: "Via API", email: "api-seuil@x.com" }) }));
     expect(res.status).toBe(201);
     expect(await db.lead.count({ where: { workspaceId: w.workspaceId, email: "api-seuil@x.com" } })).toBe(1);
@@ -91,6 +92,7 @@ describe("capture au-delà du seuil de leads du forfait", () => {
     const form = await publishedForm(w.workspaceId);
     const key = "sp_threshold_" + "m".repeat(20);
     await db.apiKey.create({ data: { workspaceId: w.workspaceId, name: "k", prefix: key.slice(0, 10), keyHash: sha256(key) } });
+    await grantApiPlan(w.workspaceId);
     const { createLeadAction } = await import("@/app/(app)/leads/actions");
     expect((await redirected(createLeadAction({}, fd({ name: "M", email: "m@x.com" })))).ok).toBe(true);
     expect((await apiLead(new Request("http://x/api/v1/leads", { method: "POST", headers: { authorization: `Bearer ${key}` }, body: JSON.stringify({ name: "A", email: "a@x.com" }) }))).status).toBe(201);
@@ -115,6 +117,7 @@ describe("contrôles d'abonnement conservés", () => {
     const w = await makeWorkspace();
     const key = "sp_threshold_" + "z".repeat(20);
     await db.apiKey.create({ data: { workspaceId: w.workspaceId, name: "k", prefix: key.slice(0, 10), keyHash: sha256(key) } });
+    await grantApiPlan(w.workspaceId);
     await db.subscription.update({ where: { workspaceId: w.workspaceId }, data: { status: "canceled" } });
     const res = await apiLead(new Request("http://x/api/v1/leads", { method: "POST", headers: { authorization: `Bearer ${key}` }, body: JSON.stringify({ name: "N", email: "n@x.com" }) }));
     expect(res.status).toBe(402);

@@ -7,18 +7,19 @@ import { db } from "@/lib/db";
 import { audit } from "@/lib/audit";
 import { run, parse, formObject, optStr, UserError, type ActionState } from "@/lib/action";
 import { DEFAULT_SEQUENCE_STEPS, processDueFollowUps, stepsSchema } from "@/lib/followups";
-import { limitReached } from "@/lib/plans";
-import { workspaceUsage } from "@/lib/billing";
+import type { Plan } from "@/lib/plans";
+import { QuotaError, createWithinLimit } from "@/lib/quota";
 
-async function quota(ctx: { workspaceId: string; ent: { plan: Parameters<typeof limitReached>[0] } }) {
-  const usage = await workspaceUsage(ctx.workspaceId);
-  if (limitReached(ctx.ent.plan, "sequences", usage.sequences)) throw new UserError("Limite de séquences atteinte pour votre plan.");
+/** Création d'une séquence : comptage et insertion dans la même transaction verrouillée (deux requêtes simultanées ne dépassent pas la limite du forfait). */
+async function createSequence(ctx: { workspaceId: string; ent: { plan: Plan } }, data: Prisma.FollowUpSequenceUncheckedCreateInput) {
+  try {
+    await createWithinLimit({ workspaceId: ctx.workspaceId, plan: ctx.ent.plan, key: "sequences", message: "Limite de séquences atteinte pour votre plan.", create: (tx) => tx.followUpSequence.create({ data }) });
+  } catch (e) { if (e instanceof QuotaError) throw new UserError(e.message); throw e; }
 }
 
 export async function createDefaultSequenceAction(): Promise<ActionState> {
   return run({ action: "write" }, async (ctx) => {
-    await quota(ctx);
-    await db.followUpSequence.create({ data: { workspaceId: ctx.workspaceId, name: "Relance standard J0 · J1 · J3 · J7 · J14", description: "Accusé de réception, appel, relance, rappel, clôture automatique sans réponse.", steps: DEFAULT_SEQUENCE_STEPS as unknown as Prisma.InputJsonValue, active: true, autoEnroll: false, sendEmails: false } });
+    await createSequence(ctx, { workspaceId: ctx.workspaceId, name: "Relance standard J0 · J1 · J3 · J7 · J14", description: "Accusé de réception, appel, relance, rappel, clôture automatique sans réponse.", steps: DEFAULT_SEQUENCE_STEPS as unknown as Prisma.InputJsonValue, active: true, autoEnroll: false, sendEmails: false });
     revalidatePath("/automations");
     return { ok: true, message: "Séquence créée. L'envoi d'e-mails est désactivé par défaut : activez-le explicitement quand votre e-mail est connecté." };
   });
@@ -45,7 +46,7 @@ export async function saveSequenceAction(_: ActionState, fd: FormData): Promise<
     if (d.id) {
       const u = await db.followUpSequence.updateMany({ where: { id: d.id, workspaceId: ctx.workspaceId }, data });
       if (!u.count) throw new UserError("Séquence introuvable.");
-    } else { await quota(ctx); await db.followUpSequence.create({ data: { ...data, workspaceId: ctx.workspaceId } }); }
+    } else await createSequence(ctx, { ...data, workspaceId: ctx.workspaceId });
     await audit({ workspaceId: ctx.workspaceId, userId: ctx.user.id, action: "sequence.saved", entity: "FollowUpSequence", entityId: d.id, meta: { sendEmails: data.sendEmails } });
     revalidatePath("/automations");
     return { ok: true, message: "Séquence enregistrée." };

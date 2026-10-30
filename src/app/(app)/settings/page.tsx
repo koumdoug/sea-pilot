@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { db } from "@/lib/db";
 import { env } from "@/lib/env";
 import { requireCtx } from "@/lib/tenant";
+import { planAllowsApi } from "@/lib/plans";
 import { COMPANY_SIZES, CURRENCIES, LANGUAGES } from "@/lib/constants";
 import { DEFAULT_THRESHOLDS, normalizeCriteria } from "@/lib/scoring";
 import { Alert, Badge, Card, LinkButton, PageHeader, Section, TableWrap, Td, Th, fmtDate } from "@/components/ui";
@@ -72,7 +73,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
 
       {tab === "equipe" && <Team ctxRole={ctx.role} workspaceId={ctx.workspaceId} userId={ctx.user.id} canManage={ctx.can("manage_members")} />}
       {tab === "qualification" && <Qualification workspaceId={ctx.workspaceId} canEdit={ctx.can("manage_settings")} />}
-      {tab === "api" && <ApiKeys workspaceId={ctx.workspaceId} canManage={ctx.can("manage_integrations")} slug={w.slug} />}
+      {tab === "api" && <ApiKeys workspaceId={ctx.workspaceId} canManage={ctx.can("manage_integrations")} slug={w.slug} apiAllowed={planAllowsApi(ctx.ent.plan)} />}
 
       {tab === "confidentialite" && (
         <div className="grid max-w-3xl gap-5">
@@ -148,12 +149,13 @@ async function Qualification({ workspaceId, canEdit }: { workspaceId: string; ca
   );
 }
 
-async function ApiKeys({ workspaceId, canManage, slug }: { workspaceId: string; canManage: boolean; slug: string }) {
+async function ApiKeys({ workspaceId, canManage, slug, apiAllowed }: { workspaceId: string; canManage: boolean; slug: string; apiAllowed: boolean }) {
   const keys = await db.apiKey.findMany({ where: { workspaceId }, orderBy: { createdAt: "desc" } });
   return (
     <div className="space-y-5">
       <Section title="Clés API" description="Pour envoyer des leads depuis un autre outil (serveur à serveur). Ne placez jamais une clé dans un site public.">
-        {canManage ? <ApiKeyCreator action={createApiKeyAction} /> : <Alert tone="info">Seuls les administrateurs gèrent les clés API.</Alert>}
+        {!apiAllowed ? <Alert tone="info">L'accès API est réservé au forfait Pro. {keys.some((k) => !k.revokedAt) ? "Les clés existantes sont inactives : leurs appels sont refusés tant que le forfait n'est pas Pro. " : ""}<a className="underline" href="/billing">Voir les forfaits</a></Alert>
+          : canManage ? <ApiKeyCreator action={createApiKeyAction} /> : <Alert tone="info">Seuls les administrateurs gèrent les clés API.</Alert>}
         <div className="mt-4">{keys.length === 0 ? <p className="text-sm text-slate-500">Aucune clé.</p> : (
           <TableWrap caption="Clés API"><thead><tr><Th>Nom</Th><Th>Préfixe</Th><Th>Dernier usage</Th><Th>État</Th><Th><span className="sr-only">Actions</span></Th></tr></thead>
             <tbody>{keys.map((k) => <tr key={k.id}><Td>{k.name}</Td><Td><code>{k.prefix}…</code></Td><Td>{fmtDate(k.lastUsedAt, true)}</Td><Td>{k.revokedAt ? <Badge tone="gray">Révoquée</Badge> : <Badge tone="green">Active</Badge>}</Td><Td>{canManage && !k.revokedAt && <InlineAction action={revokeApiKeyAction} variant="danger" hidden={{ id: k.id }} confirm="Révoquer cette clé ? Les appels qui l'utilisent échoueront.">Révoquer</InlineAction>}</Td></tr>)}</tbody></TableWrap>

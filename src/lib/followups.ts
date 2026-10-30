@@ -4,6 +4,7 @@ import { db } from "./db";
 import { sendFollowUpEmail } from "./email";
 import { TERMINAL_STATUSES, FOLLOWUP_ACTIONS, LEAD_STATUSES } from "./constants";
 import { log, errMsg } from "./logger";
+import { entitlementForWorkspace } from "./free-access";
 
 export const stepSchema = z.object({
   day: z.number().int().min(0).max(365),
@@ -76,8 +77,17 @@ export type ProcessSummary = { processed: number; done: number; blocked: number;
 /** Exécute les relances arrivées à échéance. Un e-mail n'est JAMAIS envoyé sans configuration + consentement explicites. */
 export async function processDueFollowUps(opts: { workspaceId?: string; now?: Date; limit?: number } = {}): Promise<ProcessSummary> {
   const now = opts.now ?? new Date();
+  const scope = opts.workspaceId ? { workspaceId: opts.workspaceId } : {};
+  // Exécution = droit du forfait : un espace sans abonnement actif (essai expiré, abonnement terminé, impayé hors délai) n'exécute AUCUNE relance
+  // (ni e-mail, ni tâche). Ses relances restent en attente et reprennent à la réactivation ; elles sont exclues de la requête pour ne pas
+  // occuper la fenêtre de traitement des autres espaces.
+  const candidates = (await db.followUp.findMany({ where: { status: "pending", dueAt: { lte: now }, ...scope }, distinct: ["workspaceId"], select: { workspaceId: true } })).map((c) => c.workspaceId);
+  const subs = new Map((await db.subscription.findMany({ where: { workspaceId: { in: candidates } } })).map((s) => [s.workspaceId, s]));
+  const inactive: string[] = [];
+  for (const id of candidates) if (!(await entitlementForWorkspace(id, subs.get(id) ?? null)).active) inactive.push(id);
+  if (opts.workspaceId && inactive.includes(opts.workspaceId)) return { processed: 0, done: 0, blocked: 0, failed: 0, cancelled: 0 };
   const due = await db.followUp.findMany({
-    where: { status: "pending", dueAt: { lte: now }, ...(opts.workspaceId ? { workspaceId: opts.workspaceId } : {}) },
+    where: { status: "pending", dueAt: { lte: now }, ...(opts.workspaceId ? scope : inactive.length ? { workspaceId: { notIn: inactive } } : {}) },
     orderBy: { dueAt: "asc" }, take: opts.limit ?? 200, include: { lead: true, sequence: true },
   });
   const sum: ProcessSummary = { processed: 0, done: 0, blocked: 0, failed: 0, cancelled: 0 };

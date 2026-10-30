@@ -3,7 +3,7 @@ import { db } from "@/lib/db";
 import { sha256 } from "@/lib/crypto";
 import { addProspect, ensureDefaultProducts, optOutProspect } from "@/lib/portfolio/service";
 import { POST } from "@/app/api/v1/product-events/route";
-import { makeWorkspace, resetDb } from "./helpers";
+import { makeWorkspace, resetDb, grantApiPlan } from "./helpers";
 
 beforeEach(resetDb);
 
@@ -12,6 +12,7 @@ async function setup(name = "Events") {
   await ensureDefaultProducts(a.workspaceId, a.userId);
   const key = `sp_${Math.random().toString(36).slice(2)}${Date.now()}`;
   await db.apiKey.create({ data: { workspaceId: a.workspaceId, name: "k", prefix: key.slice(0, 10), keyHash: sha256(key) } });
+  await grantApiPlan(a.workspaceId);
   const driver = await db.product.findFirstOrThrow({ where: { workspaceId: a.workspaceId, slug: "driverpilot" } });
   const { prospect } = await addProspect(a.workspaceId, { name: "Marie Roy", email: "marie@roy.ca", source: "Site public", collectedAt: new Date("2026-10-01"), legalBasis: "implied_published", productId: driver.id });
   return { ...a, key, driver, prospect };

@@ -111,7 +111,7 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
           {(Object.keys(e.plan.limits) as (keyof PlanLimits)[]).filter((k) => k !== "aiGenerationsPerDay").map((k) => {
             const lim = e.plan.limits[k];
             const used = usage[k];
-            const pct = lim === UNLIMITED ? 0 : Math.min(100, (used / lim) * 100);
+            const pct = lim === UNLIMITED ? 0 : lim === 0 ? (used > 0 ? 100 : 0) : Math.min(100, (used / lim) * 100); // limite 0 (droit non inclus) : jamais de division par zéro
             return (
               <li key={k} className="rounded-lg border border-slate-200 p-3 text-sm"><div className="flex justify-between"><span>{LIMIT_LABEL[k]}</span><span className="tabular-nums font-medium">{used} / {limitText(lim)}</span></div>
                 <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100" role="progressbar" aria-valuenow={used} aria-valuemin={0} aria-valuemax={lim === UNLIMITED ? undefined : lim} aria-label={LIMIT_LABEL[k]}><div className={`h-full ${pct >= 100 ? "bg-red-500" : pct >= 80 ? "bg-amber-500" : "bg-brand-600"}`} style={{ width: `${pct}%` }} /></div>

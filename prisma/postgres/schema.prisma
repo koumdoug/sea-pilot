@@ -150,6 +150,9 @@ model Subscription {
   stripeSubscriptionId String?   @unique
   // Dernière synchronisation de l'état depuis Stripe : une synchronisation plus ancienne n'écrase jamais une plus récente.
   stripeSyncedAt        DateTime?
+  // Bail d'exclusion des synchronisations Stripe : une seule lecture-écriture par abonnement à la fois (jeton de clôture = stripeSyncLeaseId).
+  stripeSyncLeaseId     String?
+  stripeSyncLeaseUntil  DateTime?
   // Réservation d'une tentative de souscription (une seule session de paiement ouverte par espace, quel que soit le serveur).
   checkoutReservationId String?
   checkoutReservedUntil DateTime?

@@ -13,14 +13,45 @@ export class FakeStripe implements StripeGateway {
   unavailable = false;
   /** Latence simulée (ms) : force l'entrelacement des requêtes concurrentes. */
   lagMs = 0;
+  /** Plus grand nombre de lectures simultanées d'un MÊME abonnement observé (les synchronisations sous bail doivent le garder à 1). */
+  maxConcurrentReads = 0;
+  private activeReads = new Map<string, number>();
+  private holds: { entered: () => void; released: Promise<void> }[] = [];
+  private failures: { method: string; error: Error }[] = [];
 
-  reset() { this.subs.clear(); this.sessions.clear(); this.byKey.clear(); this.customersCreated = 0; this.sessionsCreated = 0; this.expired = []; this.calls = []; this.unavailable = false; this.lagMs = 0; }
+  /** Panne ponctuelle : le prochain appel de `method` échoue (erreur réseau simulée). */
+  failNext(method: string, error: Error = new BillingError("Erreur réseau Stripe (simulation)")) { this.failures.push({ method, error }); }
+  /**
+   * Suspend la PROCHAINE lecture d'abonnement APRÈS qu'elle a capturé l'état courant de Stripe : la lecture renverra donc un état qui sera ancien
+   * quand elle reprendra. `entered` se résout quand la lecture est suspendue ; `release()` la laisse reprendre.
+   */
+  holdNextRead() {
+    let entered!: () => void, release!: () => void;
+    const e = new Promise<void>((r) => { entered = r; }), released = new Promise<void>((r) => { release = r; });
+    this.holds.push({ entered, released });
+    return { entered: e, release };
+  }
+  private takeFailure(method: string) { const i = this.failures.findIndex((f) => f.method === method); if (i >= 0) throw this.failures.splice(i, 1)[0].error; }
+
+  reset() { this.maxConcurrentReads = 0; this.activeReads.clear(); this.holds = []; this.failures = []; this.subs.clear(); this.sessions.clear(); this.byKey.clear(); this.customersCreated = 0; this.sessionsCreated = 0; this.expired = []; this.calls = []; this.unavailable = false; this.lagMs = 0; }
   private async gate(call: string) {
     this.calls.push(call);
     if (this.lagMs) await new Promise((r) => setTimeout(r, this.lagMs));
     if (this.unavailable) throw new BillingError("Stripe indisponible (simulation)");
   }
-  async getSubscription(id: string) { await this.gate(`getSubscription:${id}`); const s = this.subs.get(id); return s ? structuredClone(s) : null; }
+  async getSubscription(id: string) {
+    this.takeFailure("getSubscription");
+    await this.gate(`getSubscription:${id}`);
+    const n = (this.activeReads.get(id) ?? 0) + 1;
+    this.activeReads.set(id, n);
+    this.maxConcurrentReads = Math.max(this.maxConcurrentReads, n);
+    try {
+      const s = this.subs.get(id), snapshot = s ? structuredClone(s) : null; // l'état est capturé ICI (instant de traitement chez Stripe)
+      const hold = this.holds.shift();
+      if (hold) { hold.entered(); await hold.released; }
+      return snapshot;
+    } finally { this.activeReads.set(id, (this.activeReads.get(id) ?? 1) - 1); }
+  }
   async getCheckoutSession(id: string) { await this.gate(`getCheckoutSession:${id}`); const s = this.sessions.get(id); return s ? { status: s.status } : null; }
   async expireCheckoutSession(id: string) {
     await this.gate(`expireCheckoutSession:${id}`);

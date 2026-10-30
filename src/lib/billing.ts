@@ -174,7 +174,7 @@ export async function createCheckoutSession(p: { workspaceId: string; plan: stri
     let remote: StripeSub | null;
     try { remote = await gw.getSubscription(sub.stripeSubscriptionId); } catch { throw new BillingError("Vérification de votre abonnement impossible auprès de Stripe : réessayez dans un instant."); }
     if (remote && isEntitledStripeStatus(remote.status)) {
-      await applyRemoteSubscription(sub, remote, new Date(), gw, "checkout_precheck");
+      await syncFromStripe(sub, sub.stripeSubscriptionId, gw, "checkout_precheck", { missingIsCanceled: true }).catch((e) => log.warn("billing.precheck_sync_failed", { error: errMsg(e) })); // répare l'état local ; la souscription reste refusée dans tous les cas
       throw new BillingError("Un abonnement payant est déjà actif chez Stripe : utilisez le changement de forfait.");
     }
   }
@@ -288,91 +288,150 @@ const PAID_STATUSES = ["active", "past_due"];
 
 export type SyncOutcome = { outcome: "handled" | "ignored" | "needs_review"; note?: string; workspaceId: string };
 
+/** Une synchronisation de cet abonnement est déjà en cours ailleurs (bail non expiré) : réessayer plus tard, rien n'est modifié. */
+export class SyncBusyError extends BillingError {}
+
 /**
- * Applique à la base l'état d'un abonnement RELU chez Stripe (jamais le contenu d'un événement : il peut être ancien ou arriver dans le désordre).
- *  - Convergent et idempotent : rejouer, retarder ou croiser des événements aboutit au même état, celui de Stripe.
- *  - Écriture conditionnelle (compare-and-swap) : une synchronisation plus ancienne n'écrase jamais une plus récente (`stripeSyncedAt`), et
- *    l'identifiant d'abonnement lu au départ doit être encore celui de la base.
+ * Bail d'exclusion des synchronisations (lecture Stripe + écriture) d'UN abonnement, valable entre serveurs.
+ * Pourquoi un bail et pas un horodatage : l'ordre de FIN des lectures n'est pas l'ordre des états lus (une lecture ancienne et lente peut finir
+ * après une lecture récente), et l'ordre de DÉBUT ne l'est pas non plus si Stripe traite deux requêtes voisines dans l'ordre inverse.
+ * Avec un bail, deux lectures du même abonnement ne se chevauchent JAMAIS : la lecture d'une synchronisation commence après la validation de
+ * la précédente, donc l'état lu est au moins aussi récent. L'identifiant de bail sert de jeton de clôture : un détenteur dont le bail a expiré
+ * (processus suspendu, très lent) puis a été repris ne peut plus écrire. L'horloge locale ne décide que QUAND un bail abandonné peut être repris ;
+ * la sûreté, elle, vient de l'écriture conditionnelle sur l'identifiant de bail.
+ */
+export const SYNC_LEASE_MS = 90_000;
+export const SYNC_WAIT_MS = 10_000;
+
+async function acquireSyncLease(subscriptionId: string, waitMs = SYNC_WAIT_MS): Promise<string> {
+  const lease = randomToken(12), deadline = Date.now() + waitMs;
+  for (;;) {
+    const now = new Date();
+    const r = await db.subscription.updateMany({
+      where: { id: subscriptionId, OR: [{ stripeSyncLeaseUntil: null }, { stripeSyncLeaseUntil: { lt: now } }] },
+      data: { stripeSyncLeaseId: lease, stripeSyncLeaseUntil: new Date(now.getTime() + SYNC_LEASE_MS) },
+    });
+    if (r.count === 1) return lease;
+    if (Date.now() >= deadline) throw new SyncBusyError("Une synchronisation de cet abonnement est déjà en cours : réessayez dans un instant.");
+    await new Promise((res) => setTimeout(res, 100));
+  }
+}
+const releaseSyncLease = (subscriptionId: string, lease: string) =>
+  db.subscription.updateMany({ where: { id: subscriptionId, stripeSyncLeaseId: lease }, data: { stripeSyncLeaseId: null, stripeSyncLeaseUntil: null } });
+
+/**
+ * Applique à la base l'état d'un abonnement RELU chez Stripe, sous un bail de synchronisation détenu par l'appelant.
+ *  - L'état local est RELU juste avant l'écriture et le résultat est calculé à partir de lui (jamais d'un instantané ancien) ; l'écriture est
+ *    conditionnelle sur la version lue (`updatedAt`) ET sur le bail : une modification locale concurrente (résiliation, essai, réservation de
+ *    paiement) fait recommencer le calcul au lieu d'être écrasée, et un bail perdu interrompt l'écriture.
  *  - Un abonnement vivant n'est JAMAIS remplacé par un autre identifiant : si les deux sont actifs chez Stripe, l'écart est signalé (`needs_review`)
  *    et l'état courant est conservé. Un abonnement non actif d'un autre identifiant (ancien, annulé) est ignoré.
  *  - Le forfait n'est appliqué que pour un abonnement actif ou en cours de règlement ; « incomplete » ne change ni le forfait ni un essai valide.
  */
-export async function applyRemoteSubscription(local: Subscription, remote: StripeSub, syncedAt: Date, gw: StripeGateway, source: string, now = new Date()): Promise<SyncOutcome> {
-  const workspaceId = local.workspaceId;
+async function applyRemoteSubscription(subscriptionRowId: string, remote: StripeSub, gw: StripeGateway, source: string, lease: string, now = new Date()): Promise<SyncOutcome> {
   const mapped = STATUS_MAP[remote.status] ?? "incomplete";
   const entitled = mapped === "active" || mapped === "past_due";
-  if (local.stripeCustomerId && remote.customer && local.stripeCustomerId !== remote.customer)
-    return { outcome: "needs_review", workspaceId, note: "Le client Stripe de l'abonnement diffère de celui de l'espace : aucune modification." };
-  if (local.stripeSubscriptionId && local.stripeSubscriptionId !== remote.id) {
-    if (!entitled) return { outcome: "ignored", workspaceId, note: "Abonnement non actif d'un autre identifiant : état courant inchangé." };
-    if (PAID_STATUSES.includes(local.status)) {
-      const current = await gw.getSubscription(local.stripeSubscriptionId); // une erreur Stripe interrompt le traitement : l'événement sera repris
-      if (current && isEntitledStripeStatus(current.status)) {
-        log.error("billing.duplicate_subscription", { workspaceId, kept: local.stripeSubscriptionId, duplicate: remote.id });
-        await audit({ workspaceId, action: "billing.duplicate_subscription", meta: { kept: local.stripeSubscriptionId, duplicate: remote.id, source } });
-        return { outcome: "needs_review", workspaceId, note: `Deux abonnements actifs chez Stripe (${local.stripeSubscriptionId} conservé, ${remote.id} à examiner) : aucun remplacement automatique.` };
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const local = await db.subscription.findUnique({ where: { id: subscriptionRowId } });
+    if (!local) throw new BillingError("Abonnement local introuvable.");
+    const workspaceId = local.workspaceId;
+    if (local.stripeSyncLeaseId !== lease) return { outcome: "ignored", workspaceId, note: "Synchronisation devenue obsolète (bail repris par une autre) : rien n'est écrit." };
+    if (local.stripeCustomerId && remote.customer && local.stripeCustomerId !== remote.customer)
+      return { outcome: "needs_review", workspaceId, note: "Le client Stripe de l'abonnement diffère de celui de l'espace : aucune modification." };
+    if (local.stripeSubscriptionId && local.stripeSubscriptionId !== remote.id) {
+      if (!entitled) return { outcome: "ignored", workspaceId, note: "Abonnement non actif d'un autre identifiant : état courant inchangé." };
+      if (PAID_STATUSES.includes(local.status)) {
+        const current = await gw.getSubscription(local.stripeSubscriptionId); // une erreur Stripe interrompt le traitement : l'événement sera repris
+        if (current && isEntitledStripeStatus(current.status)) {
+          log.error("billing.duplicate_subscription", { workspaceId, kept: local.stripeSubscriptionId, duplicate: remote.id });
+          await audit({ workspaceId, action: "billing.duplicate_subscription", meta: { kept: local.stripeSubscriptionId, duplicate: remote.id, source } });
+          return { outcome: "needs_review", workspaceId, note: `Deux abonnements actifs chez Stripe (${local.stripeSubscriptionId} conservé, ${remote.id} à examiner) : aucun remplacement automatique.` };
+        }
       }
     }
+    const plan = entitled ? (planFromPriceId(remote.items?.data[0]?.price?.id) ?? remote.metadata?.plan ?? local.plan) : local.plan;
+    const periodEnd = remote.current_period_end ?? remote.items?.data[0]?.current_period_end;
+    // Paiement non abouti (incomplete / expired) : ni forfait, ni statut ne changent si un essai valide est en cours ; sinon seul le statut est enregistré.
+    const localTrialValid = local.status === "trialing" && !!local.trialEndsAt && local.trialEndsAt.getTime() > now.getTime();
+    const status = !entitled && mapped !== "canceled" && localTrialValid ? local.status : mapped;
+    const data = {
+      stripeSubscriptionId: remote.id, stripeCustomerId: remote.customer ?? local.stripeCustomerId,
+      plan: planOrNull(plan) ? plan : local.plan, status,
+      currentPeriodEnd: periodEnd ? new Date(periodEnd * 1000) : local.currentPeriodEnd, cancelAtPeriodEnd: !!remote.cancel_at_period_end,
+      canceledAt: status === "canceled" ? (local.canceledAt ?? (remote.canceled_at ? new Date(remote.canceled_at * 1000) : now)) : null,
+      trialEndsAt: remote.status === "trialing" && remote.trial_end ? new Date(remote.trial_end * 1000) : local.trialEndsAt,
+      stripeSyncedAt: now,
+      // L'abonnement est confirmé : la tentative de souscription en cours est terminée.
+      ...(entitled ? { checkoutReservationId: null, checkoutReservedUntil: null, checkoutSessionId: null } : {}),
+    };
+    const written = await db.subscription.updateMany({ where: { id: local.id, updatedAt: local.updatedAt, stripeSyncLeaseId: lease }, data });
+    if (written.count === 0) continue; // modifié entre la lecture et l'écriture : on relit l'état local et on recalcule (le bail est revérifié en tête de boucle)
+    const time = (d: Date | null) => d?.getTime() ?? null;
+    const unchanged = local.stripeSubscriptionId === data.stripeSubscriptionId && local.stripeCustomerId === data.stripeCustomerId && local.plan === data.plan && local.status === data.status
+      && time(local.currentPeriodEnd) === time(data.currentPeriodEnd) && local.cancelAtPeriodEnd === data.cancelAtPeriodEnd && time(local.canceledAt) === time(data.canceledAt) && time(local.trialEndsAt) === time(data.trialEndsAt)
+      && !(entitled && (local.checkoutReservationId || local.checkoutReservedUntil || local.checkoutSessionId));
+    if (unchanged) return { outcome: "ignored", workspaceId, note: "L'état local correspond déjà à celui de Stripe." };
+    await audit({ workspaceId, action: "billing.stripe_sync", meta: { source, status } });
+    return { outcome: "handled", workspaceId };
   }
-  const plan = entitled ? (planFromPriceId(remote.items?.data[0]?.price?.id) ?? remote.metadata?.plan ?? local.plan) : local.plan;
-  const periodEnd = remote.current_period_end ?? remote.items?.data[0]?.current_period_end;
-  // Paiement non abouti (incomplete / expired) : ni forfait, ni statut ne changent si un essai valide est en cours ; sinon seul le statut est enregistré.
-  const localTrialValid = local.status === "trialing" && !!local.trialEndsAt && local.trialEndsAt.getTime() > now.getTime();
-  const status = !entitled && mapped !== "canceled" && localTrialValid ? local.status : mapped;
-  const data = {
-    stripeSubscriptionId: remote.id, stripeCustomerId: remote.customer ?? local.stripeCustomerId,
-    plan: planOrNull(plan) ? plan : local.plan, status,
-    currentPeriodEnd: periodEnd ? new Date(periodEnd * 1000) : local.currentPeriodEnd, cancelAtPeriodEnd: !!remote.cancel_at_period_end,
-    canceledAt: status === "canceled" ? (local.canceledAt ?? (remote.canceled_at ? new Date(remote.canceled_at * 1000) : now)) : null,
-    trialEndsAt: remote.status === "trialing" && remote.trial_end ? new Date(remote.trial_end * 1000) : local.trialEndsAt,
-    stripeSyncedAt: syncedAt,
-    // L'abonnement est confirmé : la tentative de souscription en cours est terminée.
-    ...(entitled ? { checkoutReservationId: null, checkoutReservedUntil: null, checkoutSessionId: null } : {}),
-  };
-  const written = await db.subscription.updateMany({
-    where: { id: local.id, stripeSubscriptionId: local.stripeSubscriptionId, OR: [{ stripeSyncedAt: null }, { stripeSyncedAt: { lte: syncedAt } }] },
-    data,
-  });
-  if (written.count === 0) return { outcome: "ignored", workspaceId, note: "Une synchronisation plus récente ou un changement concurrent a déjà été appliqué." };
-  const time = (d: Date | null) => d?.getTime() ?? null;
-  const unchanged = local.stripeSubscriptionId === data.stripeSubscriptionId && local.stripeCustomerId === data.stripeCustomerId && local.plan === data.plan && local.status === data.status
-    && time(local.currentPeriodEnd) === time(data.currentPeriodEnd) && local.cancelAtPeriodEnd === data.cancelAtPeriodEnd && time(local.canceledAt) === time(data.canceledAt) && time(local.trialEndsAt) === time(data.trialEndsAt)
-    && !(entitled && (local.checkoutReservationId || local.checkoutReservedUntil || local.checkoutSessionId));
-  if (unchanged) return { outcome: "ignored", workspaceId, note: "L'état local correspond déjà à celui de Stripe." };
-  await audit({ workspaceId, action: "billing.stripe_sync", meta: { source, status } });
-  return { outcome: "handled", workspaceId };
-}
-
-/** Relit l'abonnement chez Stripe puis l'applique. Un abonnement introuvable chez Stripe est un abonnement terminé (sauf `missingIsCanceled: false` : erreur). */
-async function syncFromStripe(local: Subscription, subscriptionId: string, gw: StripeGateway, source: string, opts: { missingIsCanceled: boolean }): Promise<SyncOutcome> {
-  const remote = await gw.getSubscription(subscriptionId);
-  const syncedAt = new Date();
-  if (!remote && !opts.missingIsCanceled) throw new BillingError(`Abonnement ${subscriptionId} introuvable chez Stripe.`);
-  return applyRemoteSubscription(local, remote ?? { id: subscriptionId, customer: local.stripeCustomerId ?? undefined, status: "canceled" }, syncedAt, gw, source);
-}
-
-/** Réconciliation d'un espace avec Stripe (abonnement relu et appliqué). Une indisponibilité de Stripe lève l'erreur : l'état local n'est alors JAMAIS modifié. */
-export async function reconcileSubscription(workspaceId: string, gw: StripeGateway = gateway): Promise<SyncOutcome | null> {
-  const local = await db.subscription.findUnique({ where: { workspaceId } });
-  if (!local?.stripeSubscriptionId) return null;
-  return syncFromStripe(local, local.stripeSubscriptionId, gw, "reconcile", { missingIsCanceled: true });
+  throw new BillingError("Modifications locales concurrentes persistantes : la synchronisation sera reprise.");
 }
 
 /**
- * Réconciliation périodique (tâche planifiée) des abonnements payants dont l'état local peut être périmé : période échue, ou aucune synchronisation
- * depuis 24 h. Stripe indisponible : l'abonnement est compté en échec et laissé tel quel (aucun droit retiré ni accordé sur une simple panne).
+ * Relit l'abonnement chez Stripe PUIS l'applique, le tout sous le bail de synchronisation de l'abonnement local : lectures et écritures d'un même
+ * abonnement sont strictement ordonnées. Un abonnement introuvable chez Stripe est un abonnement terminé (sauf `missingIsCanceled: false` : erreur).
  */
-export async function reconcileDueSubscriptions(opts: { now?: Date; limit?: number } = {}, gw: StripeGateway = gateway): Promise<{ checked: number; updated: number; failed: number }> {
-  const now = opts.now ?? new Date();
-  const due = await db.subscription.findMany({
-    where: { stripeSubscriptionId: { not: null }, status: { in: ["active", "past_due", "incomplete"] }, OR: [{ stripeSyncedAt: null }, { stripeSyncedAt: { lt: new Date(now.getTime() - 24 * 3_600_000) } }, { currentPeriodEnd: { lt: now } }] },
-    orderBy: { stripeSyncedAt: "asc" }, take: opts.limit ?? 50,
-  });
-  const sum = { checked: 0, updated: 0, failed: 0 };
-  for (const s of due) {
+async function syncFromStripe(localHint: Subscription, subscriptionId: string, gw: StripeGateway, source: string, opts: { missingIsCanceled: boolean; waitMs?: number }): Promise<SyncOutcome> {
+  const lease = await acquireSyncLease(localHint.id, opts.waitMs);
+  try {
+    const remote = await gw.getSubscription(subscriptionId); // lecture APRÈS l'obtention du bail
+    if (!remote && !opts.missingIsCanceled) throw new BillingError(`Abonnement ${subscriptionId} introuvable chez Stripe.`);
+    return await applyRemoteSubscription(localHint.id, remote ?? { id: subscriptionId, customer: localHint.stripeCustomerId ?? undefined, status: "canceled" }, gw, source, lease);
+  } finally {
+    await releaseSyncLease(localHint.id, lease).catch((e) => log.error("billing.sync_lease_release_failed", { error: errMsg(e) }));
+  }
+}
+
+/** Réconciliation d'un espace avec Stripe (abonnement relu et appliqué). Une indisponibilité de Stripe lève l'erreur : l'état local n'est alors JAMAIS modifié. */
+export async function reconcileSubscription(workspaceId: string, gw: StripeGateway = gateway, opts: { waitMs?: number } = {}): Promise<SyncOutcome | null> {
+  const local = await db.subscription.findUnique({ where: { workspaceId } });
+  if (!local?.stripeSubscriptionId) return null;
+  return syncFromStripe(local, local.stripeSubscriptionId, gw, "reconcile", { missingIsCanceled: true, waitMs: opts.waitMs });
+}
+
+/** Statuts locaux d'un abonnement lié à Stripe qui peuvent encore changer chez Stripe (réconciliés dès que la période est échue). */
+const RECONCILE_OPEN_STATUSES = ["trialing", "active", "past_due", "incomplete"];
+/** Un abonnement terminé (canceled / expired) reste vérifié une fois par jour pendant cette fenêtre, puis n'est plus lu : il peut avoir été terminé à tort. */
+export const RECONCILE_TERMINAL_WINDOW_MS = 90 * 86_400_000;
+export const RECONCILE_INTERVAL_MS = 24 * 3_600_000;
+
+function reconcileWhere(now: Date, extra?: Record<string, unknown>) {
+  return {
+    stripeSubscriptionId: { not: null },
+    AND: [
+      { OR: [{ stripeSyncedAt: null }, { stripeSyncedAt: { lt: new Date(now.getTime() - RECONCILE_INTERVAL_MS) } }, { status: { in: RECONCILE_OPEN_STATUSES }, currentPeriodEnd: { lt: now } }] },
+      { OR: [{ status: { notIn: ["canceled", "expired"] } }, { canceledAt: null }, { canceledAt: { gte: new Date(now.getTime() - RECONCILE_TERMINAL_WINDOW_MS) } }] },
+      ...(extra ? [extra] : []),
+    ],
+  };
+}
+
+/**
+ * Réconciliation périodique (tâche planifiée) des abonnements liés à Stripe dont l'état local peut être périmé : jamais synchronisés, période échue,
+ * ou plus de 24 h sans synchronisation — y compris les abonnements localement terminés (canceled / expired, 90 jours) qui seraient encore actifs chez Stripe.
+ * La décision d'accès vient TOUJOURS de l'état relu chez Stripe : aucun abonnement n'est réactivé « à l'aveugle ».
+ * Stripe indisponible : l'abonnement est compté en échec et laissé tel quel (aucun droit retiré ni accordé sur une simple panne).
+ * PostgreSQL trie les NULL en dernier et SQLite en premier : les jamais-synchronisés sont donc lus d'abord, explicitement.
+ */
+export async function reconcileDueSubscriptions(opts: { now?: Date; limit?: number } = {}, gw: StripeGateway = gateway): Promise<{ checked: number; updated: number; failed: number; busy: number }> {
+  const now = opts.now ?? new Date(), limit = opts.limit ?? 50;
+  const never = await db.subscription.findMany({ where: reconcileWhere(now, { stripeSyncedAt: null }), orderBy: { createdAt: "asc" }, take: limit });
+  const rest = never.length < limit ? await db.subscription.findMany({ where: reconcileWhere(now, { stripeSyncedAt: { not: null } }), orderBy: { stripeSyncedAt: "asc" }, take: limit - never.length }) : [];
+  const sum = { checked: 0, updated: 0, failed: 0, busy: 0 };
+  for (const s of [...never, ...rest]) {
     sum.checked++;
-    try { const r = await syncFromStripe(s, s.stripeSubscriptionId!, gw, "reconcile", { missingIsCanceled: true }); if (r.outcome === "handled") sum.updated++; }
-    catch (e) { sum.failed++; log.warn("billing.reconcile_failed", { workspaceId: s.workspaceId, error: errMsg(e) }); }
+    try { const r = await syncFromStripe(s, s.stripeSubscriptionId!, gw, "reconcile", { missingIsCanceled: true, waitMs: 2_000 }); if (r.outcome === "handled") sum.updated++; }
+    catch (e) { if (e instanceof SyncBusyError) sum.busy++; else { sum.failed++; log.warn("billing.reconcile_failed", { workspaceId: s.workspaceId, error: errMsg(e) }); } }
   }
   return sum;
 }

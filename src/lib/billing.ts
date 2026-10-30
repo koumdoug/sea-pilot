@@ -80,6 +80,9 @@ export interface StripeGateway {
   expireCheckoutSession(id: string): Promise<void>;
   createCustomer(p: { email: string; workspaceId: string }): Promise<{ id: string }>;
   createCheckoutSession(body: Record<string, string>, idempotencyKey: string): Promise<{ id: string; url?: string }>;
+  /** Tous les abonnements du client (tous statuts) : le contrôle anti-doublon ne se fie jamais au seul identifiant stocké localement. */
+  listCustomerSubscriptions(customerId: string): Promise<StripeSub[]>;
+  listOpenCheckoutSessions(customerId: string): Promise<{ id: string }[]>;
 }
 const isNotFound = (e: unknown) => e instanceof StripeHttpError && e.status === 404;
 export const liveStripeGateway: StripeGateway = {
@@ -88,6 +91,8 @@ export const liveStripeGateway: StripeGateway = {
   async expireCheckoutSession(id) { await stripe("POST", `/checkout/sessions/${encodeURIComponent(id)}/expire`, {}); },
   createCustomer: (p) => stripe<{ id: string }>("POST", "/customers", { email: p.email, "metadata[workspaceId]": p.workspaceId }, { idempotencyKey: `customer:${p.workspaceId}` }),
   createCheckoutSession: (body, idempotencyKey) => stripe<{ id: string; url?: string }>("POST", "/checkout/sessions", body, { idempotencyKey }),
+  async listCustomerSubscriptions(customerId) { const r = await stripe<{ data?: StripeSub[] }>("GET", `/subscriptions?customer=${encodeURIComponent(customerId)}&status=all&limit=20`); return Array.isArray(r.data) ? r.data : []; },
+  async listOpenCheckoutSessions(customerId) { const r = await stripe<{ data?: { id: string }[] }>("GET", `/checkout/sessions?customer=${encodeURIComponent(customerId)}&status=open&limit=20`); return Array.isArray(r.data) ? r.data : []; },
 };
 let gateway: StripeGateway = liveStripeGateway;
 /** Remplace la passerelle Stripe (tests uniquement) ; `null` rétablit la passerelle réelle. */
@@ -128,13 +133,26 @@ export async function selectTrialPlan(workspaceId: string, plan: string, actorId
   await audit({ workspaceId, userId: actorId, action: "billing.trial_plan_selected", meta: { plan } });
 }
 
-/** Une session de paiement ouverte vit un peu plus de 30 minutes (minimum imposé par Stripe), puis expire d'elle-même. */
-export const CHECKOUT_SESSION_TTL_MS = 31 * 60_000;
-/** Bail de la réservation tant que la session n'est pas encore créée chez Stripe. */
-export const CHECKOUT_PENDING_LEASE_MS = 120_000;
+/**
+ * Durées du paiement (V5). Stripe impose `expires_at` ≥ 30 minutes après la création de la session : une marge de 10 minutes (40 min au total)
+ * absorbe une dérive d'horloge du serveur jusqu'à ±10 min sans refus. La réservation locale survit de 5 minutes à l'expiration distante : tant qu'une
+ * session peut encore être payée chez Stripe, la réservation existe ; elle ne s'éteint jamais avant la session.
+ */
+export const STRIPE_MIN_EXPIRY_MS = 30 * 60_000;
+export const CHECKOUT_SESSION_TTL_MS = 40 * 60_000;
+export const CHECKOUT_RESERVATION_MARGIN_MS = 5 * 60_000;
+/** Bail de la réservation tant que la session n'est pas encore créée chez Stripe (vérifications + création : plusieurs appels Stripe de 25 s au plus). */
+export const CHECKOUT_PENDING_LEASE_MS = 240_000;
+
+export function checkoutExpiry(nowMs = Date.now()) {
+  const expiresAt = nowMs + CHECKOUT_SESSION_TTL_MS;
+  return { expiresAt, reservedUntil: expiresAt + CHECKOUT_RESERVATION_MARGIN_MS };
+}
 
 /** Statuts Stripe qui ouvrent des droits (actif, essai Stripe, impayé en délai de grâce). */
 const isEntitledStripeStatus = (s: string) => ["active", "past_due"].includes(STATUS_MAP[s] ?? "");
+/** Statuts d'un abonnement Stripe qui INTERDISENT d'en créer un autre : actif, en essai, en retard, impayé, en pause, en attente de confirmation. */
+const BLOCKING_STRIPE_STATUSES = ["active", "trialing", "past_due", "unpaid", "paused", "incomplete"];
 
 /**
  * Réservation ATOMIQUE d'une tentative de souscription (une seule requête SQL conditionnelle, valable entre plusieurs serveurs) :
@@ -151,7 +169,7 @@ async function reserveCheckout(subscriptionId: string, gw: StripeGateway): Promi
   let st: { status: string } | null;
   try { st = await gw.getCheckoutSession(sessionId); } catch { throw new BillingError("Vérification de votre session de paiement impossible auprès de Stripe : réessayez dans un instant."); }
   if (st?.status === "complete") throw new BillingError("Un paiement vient d'être effectué pour cet espace : la confirmation de Stripe est attendue (quelques secondes). Actualisez la page.");
-  if (st?.status === "open") { try { await gw.expireCheckoutSession(sessionId); } catch { throw new BillingError("Une session de paiement est déjà ouverte : terminez-la ou attendez son expiration (environ 30 minutes)."); } }
+  if (st?.status === "open") { try { await gw.expireCheckoutSession(sessionId); } catch { throw new BillingError("Une session de paiement est déjà ouverte : terminez-la ou attendez son expiration (environ 40 minutes)."); } }
   // Reprise conditionnelle sur la session précédente : si deux demandes arrivent ensemble, une seule la remplace.
   const retaken = await db.subscription.updateMany({ where: { id: subscriptionId, checkoutSessionId: sessionId }, data: { checkoutReservationId: id, checkoutReservedUntil: until, checkoutSessionId: null } });
   if (retaken.count !== 1) throw new BillingError("Une autre demande de paiement vient d'être lancée : réessayez dans un instant.");
@@ -160,6 +178,48 @@ async function reserveCheckout(subscriptionId: string, gw: StripeGateway): Promi
 const releaseCheckout = (subscriptionId: string, reservationId: string) =>
   db.subscription.updateMany({ where: { id: subscriptionId, checkoutReservationId: reservationId }, data: { checkoutReservationId: null, checkoutReservedUntil: null, checkoutSessionId: null } });
 
+const MSG_STRIPE_CHECK = "Vérification de votre abonnement impossible auprès de Stripe : réessayez dans un instant.";
+
+/**
+ * Sous la réservation exclusive, AVANT toute session : lit chez Stripe les abonnements du client (et l'abonnement lié localement) et refuse si l'un d'eux est
+ * actif, en essai, en retard, impayé, en pause ou en attente. C'est ce qui empêche le double paiement, y compris quand la session précédente a été payée
+ * alors que son webhook est en retard ou perdu. Un seul abonnement bloquant : l'état local est réparé, la souscription est refusée avec le bon message.
+ * Plusieurs : revue manuelle (audit + journal d'erreur), AUCUNE annulation ni remboursement automatique. Stripe indisponible : refus (jamais à l'aveugle).
+ */
+async function assertNoExistingSubscription(local: Subscription, gw: StripeGateway): Promise<void> {
+  let found: StripeSub[] = [];
+  try {
+    if (local.stripeCustomerId) found = await gw.listCustomerSubscriptions(local.stripeCustomerId);
+    if (local.stripeSubscriptionId && !found.some((s) => s.id === local.stripeSubscriptionId)) { const one = await gw.getSubscription(local.stripeSubscriptionId); if (one) found = [...found, one]; }
+  } catch { throw new BillingError(MSG_STRIPE_CHECK); }
+  const blocking = found.filter((s) => BLOCKING_STRIPE_STATUSES.includes(s.status));
+  if (!blocking.length) return;
+  if (blocking.length > 1) {
+    log.error("billing.duplicate_subscription", { workspaceId: local.workspaceId, ids: blocking.map((s) => s.id) });
+    await audit({ workspaceId: local.workspaceId, action: "billing.duplicate_subscription", meta: { ids: blocking.map((s) => s.id), source: "checkout_precheck" } });
+    throw new BillingError("Plusieurs abonnements sont déjà enregistrés pour votre compte chez Stripe : aucune nouvelle souscription n'est possible tant qu'ils n'ont pas été examinés. Contactez le support.");
+  }
+  const only = blocking[0];
+  await syncFromStripe(local, only.id, gw, "checkout_precheck", { missingIsCanceled: true }).catch((e) => log.warn("billing.precheck_sync_failed", { error: errMsg(e) })); // répare l'état local
+  if (["unpaid", "paused"].includes(only.status)) throw new BillingError("Un abonnement existe déjà chez Stripe mais son paiement n'est plus à jour : régularisez-le avec « Moyen de paiement et factures » (ou résiliez-le) avant de souscrire à nouveau.");
+  if (only.status === "incomplete") throw new BillingError("Un paiement est en cours de confirmation chez Stripe : patientez quelques instants puis actualisez la page.");
+  throw new BillingError("Un abonnement payant est déjà actif chez Stripe : utilisez le changement de forfait.");
+}
+
+/** Expire toute session de paiement encore ouverte pour ce client (session orpheline d'une interruption, session ouverte dans un autre onglet). Une session payée interdit la suite. */
+async function expireOpenCheckoutSessions(customerId: string, gw: StripeGateway): Promise<void> {
+  let open: { id: string }[];
+  try { open = await gw.listOpenCheckoutSessions(customerId); } catch { throw new BillingError("Vérification de vos sessions de paiement impossible auprès de Stripe : réessayez dans un instant."); }
+  for (const s of open) {
+    try { await gw.expireCheckoutSession(s.id); }
+    catch {
+      const st = await gw.getCheckoutSession(s.id).catch(() => null);
+      if (st?.status === "complete") throw new BillingError("Un paiement vient d'être effectué pour cet espace : la confirmation de Stripe est attendue (quelques secondes). Actualisez la page.");
+      if (st?.status !== "expired") throw new BillingError("Une session de paiement est déjà ouverte : terminez-la ou attendez son expiration (environ 40 minutes).");
+    }
+  }
+}
+
 export async function createCheckoutSession(p: { workspaceId: string; plan: string; email: string }, gw: StripeGateway = gateway): Promise<string> {
   if (!planOrNull(p.plan)) throw new BillingError("Plan inconnu.");
   const price = planPriceId(p.plan);
@@ -167,29 +227,28 @@ export async function createCheckoutSession(p: { workspaceId: string; plan: stri
   if (!planCheckoutReady(p.plan)) throw new BillingError("Paiement indisponible : la configuration Stripe est incomplète (secret de webhook manquant ou prix identiques pour deux forfaits).");
   const sub = await db.subscription.findUnique({ where: { workspaceId: p.workspaceId } });
   if (!sub) throw new BillingError("Aucun abonnement.");
+  const liveMessage = (s: Subscription) => (entitlement(s).active ? "Un abonnement payant est déjà actif : utilisez le changement de forfait." : "Un abonnement existe mais son paiement n'est plus à jour : régularisez-le avec « Moyen de paiement et factures » (ou résiliez-le) avant de souscrire à nouveau.");
   // Serveur : le masquage du bouton ne suffit pas. Un abonnement vivant se modifie par « changement de forfait » ; une seconde session de paiement le doublerait.
-  if (isLiveSubscription(sub)) throw new BillingError(entitlement(sub).active ? "Un abonnement payant est déjà actif : utilisez le changement de forfait." : "Un abonnement existe mais son paiement n'est plus à jour : régularisez-le avec « Moyen de paiement et factures » (ou résiliez-le) avant de souscrire à nouveau.");
-  // Un identifiant Stripe local ancien ne prouve pas que l'abonnement est terminé (événements perdus) : l'état réel est relu AVANT toute nouvelle souscription.
-  if (sub.stripeSubscriptionId) {
-    let remote: StripeSub | null;
-    try { remote = await gw.getSubscription(sub.stripeSubscriptionId); } catch { throw new BillingError("Vérification de votre abonnement impossible auprès de Stripe : réessayez dans un instant."); }
-    if (remote && isEntitledStripeStatus(remote.status)) {
-      await syncFromStripe(sub, sub.stripeSubscriptionId, gw, "checkout_precheck", { missingIsCanceled: true }).catch((e) => log.warn("billing.precheck_sync_failed", { error: errMsg(e) })); // répare l'état local ; la souscription reste refusée dans tous les cas
-      throw new BillingError("Un abonnement payant est déjà actif chez Stripe : utilisez le changement de forfait.");
-    }
-  }
+  if (isLiveSubscription(sub)) throw new BillingError(liveMessage(sub));
   const usage = await workspaceUsage(p.workspaceId);
   const blockers = comparePlans(sub.plan, p.plan) === "downgrade" ? downgradeBlockers(PLANS[p.plan as PlanId], usage) : [];
   if (blockers.length) throw new BillingError(`Impossible : votre usage dépasse les limites du plan (${blockers.join(" ; ")}).`);
 
+  // RÉSERVATION D'ABORD : toutes les vérifications et la création qui suivent sont exécutées par un seul serveur à la fois pour cet espace.
   const reservation = await reserveCheckout(sub.id, gw);
+  let created: string | null = null;
   try {
-    let customer = sub.stripeCustomerId;
-    if (!customer) {
+    const fresh = (await db.subscription.findUnique({ where: { id: sub.id } })) ?? sub;
+    if (isLiveSubscription(fresh)) throw new BillingError(liveMessage(fresh)); // l'état a pu changer entre le premier contrôle et la réservation
+    let customer = fresh.stripeCustomerId;
+    if (customer) {
+      await assertNoExistingSubscription(fresh, gw);
+      await expireOpenCheckoutSessions(customer, gw);
+    } else {
       customer = (await gw.createCustomer({ email: p.email, workspaceId: p.workspaceId })).id;
       await db.subscription.update({ where: { workspaceId: p.workspaceId }, data: { stripeCustomerId: customer } });
     }
-    const expiresAt = Date.now() + CHECKOUT_SESSION_TTL_MS;
+    const { expiresAt, reservedUntil } = checkoutExpiry();
     const body: Record<string, string> = {
       mode: "subscription", customer, "line_items[0][price]": price, "line_items[0][quantity]": "1",
       success_url: `${env.appUrl}/billing?success=1`, cancel_url: `${env.appUrl}/billing?canceled=1`, expires_at: String(Math.floor(expiresAt / 1000)),
@@ -197,14 +256,23 @@ export async function createCheckoutSession(p: { workspaceId: string; plan: stri
       "subscription_data[metadata][workspaceId]": p.workspaceId, "subscription_data[metadata][plan]": p.plan,
     };
     // L'essai restant est honoré (Stripe exige au moins 48 h).
-    if (sub.status === "trialing" && sub.trialEndsAt && sub.trialEndsAt.getTime() > Date.now() + 49 * 3_600_000) body["subscription_data[trial_end]"] = String(Math.floor(sub.trialEndsAt.getTime() / 1000));
-    const s = await gw.createCheckoutSession(body, `checkout:${reservation}`);
+    if (fresh.status === "trialing" && fresh.trialEndsAt && fresh.trialEndsAt.getTime() > Date.now() + 49 * 3_600_000) body["subscription_data[trial_end]"] = String(Math.floor(fresh.trialEndsAt.getTime() / 1000));
+    let s: { id: string; url?: string };
+    try { s = await gw.createCheckoutSession(body, `checkout:${reservation}`); }
+    catch (e) {
+      if (/expires_at/i.test(errMsg(e))) { log.error("billing.checkout_clock_drift", { workspaceId: p.workspaceId }); throw new BillingError("La durée de la session de paiement n'a pas été acceptée par Stripe (l'horloge du serveur semble décalée de plus de 10 minutes). Réessayez ; si le problème persiste, contactez le support."); }
+      throw e;
+    }
+    created = s.id ?? null;
     if (!s.url) throw new BillingError("Stripe n'a pas renvoyé d'URL de paiement.");
     // Sans identifiant de session, la tentative ne peut pas être suivie (Stripe en renvoie toujours un) : elle est libérée plutôt que bloquante.
-    if (s.id) await db.subscription.updateMany({ where: { id: sub.id, checkoutReservationId: reservation }, data: { checkoutSessionId: s.id, checkoutReservedUntil: new Date(expiresAt) } });
-    else await releaseCheckout(sub.id, reservation);
+    if (!s.id) { await releaseCheckout(sub.id, reservation); return s.url; }
+    const stored = await db.subscription.updateMany({ where: { id: sub.id, checkoutReservationId: reservation }, data: { checkoutSessionId: s.id, checkoutReservedUntil: new Date(reservedUntil) } });
+    if (stored.count !== 1) throw new BillingError("Votre demande de paiement a expiré avant d'aboutir (réservation reprise par une autre demande) : réessayez."); // la session créée est expirée ci-dessous
+    created = null;
     return s.url;
   } catch (e) {
+    if (created) await gw.expireCheckoutSession(created).catch((err) => log.error("billing.checkout_orphan_session", { sessionId: created, error: errMsg(err) })); // jamais de session payable que l'utilisateur n'a pas reçue
     await releaseCheckout(sub.id, reservation).catch((err) => log.error("billing.checkout_release_failed", { error: errMsg(err) }));
     throw e;
   }

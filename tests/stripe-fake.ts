@@ -4,7 +4,7 @@ import { BillingError, handleStripeEvent, type StripeEvent, type StripeGateway, 
 // les tests décident de ce que Stripe répond, indépendamment du contenu (éventuellement ancien) des événements livrés.
 export class FakeStripe implements StripeGateway {
   subs = new Map<string, StripeSub>();
-  sessions = new Map<string, { status: string; url: string }>();
+  sessions = new Map<string, { status: string; url: string; customer?: string; expiresAt?: number }>();
   private byKey = new Map<string, { id: string; url: string }>();
   customersCreated = 0;
   sessionsCreated = 0;
@@ -13,6 +13,12 @@ export class FakeStripe implements StripeGateway {
   unavailable = false;
   /** Latence simulée (ms) : force l'entrelacement des requêtes concurrentes. */
   lagMs = 0;
+  /** Dérive de l'horloge de Stripe par rapport à celle de l'application (ms, positive = Stripe en avance) : Stripe exige expires_at >= 30 min dans SON futur. */
+  stripeClockDriftMs = 0;
+  /** Stripe crée la session puis la réponse n'arrive jamais (serveur interrompu, coupure réseau) : la session reste ouverte chez Stripe. */
+  throwAfterCreateOnce = false;
+  /** Appelé après la création chez Stripe et avant la réponse (simule une course avec une autre demande). */
+  afterCreate: (() => Promise<void>) | null = null;
   /** Plus grand nombre de lectures simultanées d'un MÊME abonnement observé (les synchronisations sous bail doivent le garder à 1). */
   maxConcurrentReads = 0;
   private activeReads = new Map<string, number>();
@@ -33,7 +39,7 @@ export class FakeStripe implements StripeGateway {
   }
   private takeFailure(method: string) { const i = this.failures.findIndex((f) => f.method === method); if (i >= 0) throw this.failures.splice(i, 1)[0].error; }
 
-  reset() { this.maxConcurrentReads = 0; this.activeReads.clear(); this.holds = []; this.failures = []; this.subs.clear(); this.sessions.clear(); this.byKey.clear(); this.customersCreated = 0; this.sessionsCreated = 0; this.expired = []; this.calls = []; this.unavailable = false; this.lagMs = 0; }
+  reset() { this.stripeClockDriftMs = 0; this.throwAfterCreateOnce = false; this.afterCreate = null; this.maxConcurrentReads = 0; this.activeReads.clear(); this.holds = []; this.failures = []; this.subs.clear(); this.sessions.clear(); this.byKey.clear(); this.customersCreated = 0; this.sessionsCreated = 0; this.expired = []; this.calls = []; this.unavailable = false; this.lagMs = 0; }
   private async gate(call: string) {
     this.calls.push(call);
     if (this.lagMs) await new Promise((r) => setTimeout(r, this.lagMs));
@@ -60,13 +66,29 @@ export class FakeStripe implements StripeGateway {
     s.status = "expired"; this.expired.push(id);
   }
   async createCustomer() { await this.gate("createCustomer"); return { id: `cus_fake_${++this.customersCreated}` }; }
-  async createCheckoutSession(_body: Record<string, string>, idempotencyKey: string) {
+  async createCheckoutSession(body: Record<string, string>, idempotencyKey: string) {
     await this.gate("createCheckoutSession");
     const prev = this.byKey.get(idempotencyKey); // même clé d'idempotence : Stripe renvoie la même session
     if (prev) return prev;
+    if (body.expires_at) { // règle réelle de Stripe : entre 30 minutes et 24 heures dans le futur (selon SON horloge)
+      const ms = Number(body.expires_at) * 1000 - (Date.now() + this.stripeClockDriftMs);
+      if (ms < 30 * 60_000) throw new BillingError("Invalid timestamp: `expires_at` must be at least 30 minutes after the session is created (simulation)");
+      if (ms > 24 * 3_600_000) throw new BillingError("Invalid timestamp: `expires_at` can be at most 24 hours (simulation)");
+    }
     const id = `cs_fake_${++this.sessionsCreated}`, url = `https://checkout.example/${id}`;
-    this.sessions.set(id, { status: "open", url }); this.byKey.set(idempotencyKey, { id, url });
+    this.sessions.set(id, { status: "open", url, customer: body.customer, expiresAt: Number(body.expires_at) * 1000 }); this.byKey.set(idempotencyKey, { id, url });
+    if (this.throwAfterCreateOnce) { this.throwAfterCreateOnce = false; throw new BillingError("Connexion interrompue après la création de la session (simulation)"); }
+    if (this.afterCreate) await this.afterCreate();
     return { id, url };
+  }
+  async listCustomerSubscriptions(customerId: string) { await this.gate(`listCustomerSubscriptions:${customerId}`); return [...this.subs.values()].filter((s) => s.customer === customerId).map((s) => structuredClone(s)); }
+  async listOpenCheckoutSessions(customerId: string) { await this.gate(`listOpenCheckoutSessions:${customerId}`); return [...this.sessions.entries()].filter(([, s]) => s.customer === customerId && s.status === "open").map(([id]) => ({ id })); }
+  /** Le client paie la session : elle est terminée et l'abonnement existe chez Stripe (le webhook, lui, n'est PAS livré). */
+  completeSession(id: string, over: Partial<StripeSub> = {}) {
+    const s = this.sessions.get(id)!; s.status = "complete";
+    const subId = `sub_from_${id}`;
+    this.set(subId, { status: "active", customer: s.customer ?? "cus_1", ...over });
+    return subId;
   }
 
   /** Définit l'état réel d'un abonnement chez Stripe. */

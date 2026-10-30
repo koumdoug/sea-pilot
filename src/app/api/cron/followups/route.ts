@@ -1,18 +1,25 @@
-import { db } from "@/lib/db";
 import { env } from "@/lib/env";
 import { safeEqual } from "@/lib/crypto";
 import { processDueFollowUps } from "@/lib/followups";
-import { syncIntegration } from "@/lib/integrations/service";
-import { PROVIDERS } from "@/lib/integrations/providers";
+import { listSyncableIntegrations, syncIntegration } from "@/lib/integrations/service";
 import { log, errMsg } from "@/lib/logger";
-import { reconcileDueSubscriptions, stripeConfigured } from "@/lib/billing";
+import { reconcileDueSubscriptions, stripeConfigured, type ReconcileSummary } from "@/lib/billing";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
+/** Budget total de la tâche (la route est coupée à `maxDuration` = 300 s) : marge de 60 s pour la réponse et les fins de requêtes en cours. */
+const CRON_BUDGET_MS = 240_000;
+/** Part réservée à la réconciliation Stripe : la synchronisation des intégrations s'arrête assez tôt pour la lui laisser. */
+const CRON_RECONCILE_BUDGET_MS = 90_000;
+/** Durée maximale d'une synchronisation d'intégration (un appel externe) : aucune n'est commencée si elle ne peut pas se terminer dans le budget. */
+const SYNC_ITEM_RESERVE_MS = 30_000;
+
 /**
- * Tâche planifiée (toutes les 5 à 15 minutes) : exécute les relances échues et synchronise les plateformes publicitaires.
- * Protégée par `Authorization: Bearer $CRON_SECRET`.
+ * Tâche planifiée (toutes les 5 à 15 minutes) : exécute les relances échues, synchronise les plateformes publicitaires AUTORISÉES et réconcilie les abonnements Stripe.
+ * Protégée par `Authorization: Bearer $CRON_SECRET`. Paramètres : `sync=0` (sans intégrations), `reconcile=0` (sans Stripe).
+ * Passages concurrents sans danger : les relances se réservent atomiquement, la réconciliation tient un bail par abonnement. Tout ce qui n'a pas pu être traité
+ * dans le budget est DIFFÉRÉ (jamais signalé comme réussi) et repris au passage suivant ; `complete: false` l'indique dans la réponse et dans les journaux.
  */
 async function handle(req: Request) {
   const secret = env.cronSecret;
@@ -20,22 +27,32 @@ async function handle(req: Request) {
   const given = (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "");
   if (!given || !safeEqual(given, secret)) return Response.json({ error: "Non autorisé." }, { status: 401 });
 
+  const startedAt = Date.now();
   const followups = await processDueFollowUps();
-  const syncs: { workspaceId: string; provider: string; ok: boolean }[] = [];
   const url = new URL(req.url);
+
+  const syncs = { ok: 0, errors: 0, skippedInactive: 0, skippedOverLimit: 0, deferred: 0 };
   if (url.searchParams.get("sync") !== "0") {
-    const integ = await db.integration.findMany({ where: { status: "connected" }, select: { workspaceId: true, provider: true } });
-    for (const i of integ) {
-      if (!PROVIDERS[i.provider]?.fetchMetrics) continue;
-      try { await syncIntegration(i.workspaceId, i.provider); syncs.push({ ...i, ok: true }); } catch (e) { log.warn("cron.sync_failed", { provider: i.provider, error: errMsg(e) }); syncs.push({ ...i, ok: false }); }
+    // Seules les synchronisations que le forfait autorise sont lancées (abonnement actif, dans la limite d'intégrations) ; les connexions sont conservées.
+    const plan = await listSyncableIntegrations();
+    syncs.skippedInactive = plan.skippedInactive; syncs.skippedOverLimit = plan.skippedOverLimit;
+    for (let i = 0; i < plan.allowed.length; i++) {
+      if (Date.now() - startedAt + CRON_RECONCILE_BUDGET_MS + SYNC_ITEM_RESERVE_MS > CRON_BUDGET_MS) { syncs.deferred = plan.allowed.length - i; break; }
+      const it = plan.allowed[i];
+      try { await syncIntegration(it.workspaceId, it.provider); syncs.ok++; } catch (e) { syncs.errors++; log.warn("cron.sync_failed", { provider: it.provider, error: errMsg(e) }); }
     }
   }
+
   // Réconciliation des abonnements payants avec Stripe (événements perdus) : une panne de Stripe n'empêche pas le reste de la tâche et ne modifie aucun droit.
-  let billing: { checked: number; updated: number; failed: number } | { skipped: true } = { skipped: true };
+  let billing: ReconcileSummary | { skipped: true; reason: string } = { skipped: true, reason: url.searchParams.get("reconcile") === "0" ? "désactivée par paramètre" : "Stripe non configuré" };
   if (url.searchParams.get("reconcile") !== "0" && stripeConfigured()) {
-    try { billing = await reconcileDueSubscriptions(); } catch (e) { log.warn("cron.reconcile_failed", { error: errMsg(e) }); billing = { checked: 0, updated: 0, failed: 1 }; }
+    const budgetMs = Math.min(CRON_RECONCILE_BUDGET_MS, CRON_BUDGET_MS - (Date.now() - startedAt));
+    try { billing = await reconcileDueSubscriptions({ budgetMs }); }
+    catch (e) { log.error("cron.reconcile_failed", { error: errMsg(e) }); billing = { checked: 0, updated: 0, failed: 1, busy: 0, deferred: 0, remaining: 0, complete: false, stoppedBy: null }; }
   }
-  return Response.json({ followups, syncs: syncs.length, syncErrors: syncs.filter((s) => !s.ok).length, billing });
+  const complete = syncs.deferred === 0 && ("skipped" in billing || billing.complete);
+  log.info("cron.summary", { complete, syncs, billing, elapsedMs: Date.now() - startedAt });
+  return Response.json({ followups, syncs: syncs.ok + syncs.errors, syncErrors: syncs.errors, syncSkipped: { inactive: syncs.skippedInactive, overLimit: syncs.skippedOverLimit }, syncDeferred: syncs.deferred, billing, complete });
 }
 
 export const GET = handle;

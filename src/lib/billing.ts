@@ -491,24 +491,55 @@ function reconcileWhere(now: Date, extra?: Record<string, unknown>) {
   };
 }
 
+export type ReconcileSummary = {
+  checked: number; updated: number; failed: number;
+  /** Abonnements dont la synchronisation était déjà en cours ailleurs (bail) : reprise au prochain passage. */
+  busy: number;
+  /** Candidats retenus mais NON traités à cause du budget de temps ou d'une indisponibilité de Stripe : reprise au prochain passage (leur état n'a pas changé). */
+  deferred: number;
+  /** Candidats au total non examinés pendant ce passage (retenus mais différés, ou au-delà de la limite de travail). */
+  remaining: number;
+  /** Vrai seulement si TOUS les candidats ont été examinés sans erreur ni abonnement ignoré : un passage incomplet n'est jamais présenté comme réussi. */
+  complete: boolean;
+  stoppedBy: "budget" | "stripe_unavailable" | null;
+};
+
 /**
  * Réconciliation périodique (tâche planifiée) des abonnements liés à Stripe dont l'état local peut être périmé : jamais synchronisés, période échue,
  * ou plus de 24 h sans synchronisation — y compris les abonnements localement terminés (canceled / expired, 90 jours) qui seraient encore actifs chez Stripe.
  * La décision d'accès vient TOUJOURS de l'état relu chez Stripe : aucun abonnement n'est réactivé « à l'aveugle ».
- * Stripe indisponible : l'abonnement est compté en échec et laissé tel quel (aucun droit retiré ni accordé sur une simple panne).
+ *  - Budget de temps explicite (`budgetMs`) : aucun nouvel abonnement n'est commencé s'il ne peut pas se terminer dans le budget ; les autres sont DIFFÉRÉS.
+ *  - Disjoncteur : après `maxConsecutiveFailures` erreurs Stripe consécutives, le passage s'arrête (Stripe est indisponible) au lieu d'enchaîner des délais d'attente.
+ *  - Reprise automatique : un abonnement différé, en échec ou occupé n'est pas marqué synchronisé ; il reste candidat et est repris au prochain passage.
+ *  - Stripe indisponible : aucun droit n'est retiré ni accordé (l'état local reste tel quel).
  * PostgreSQL trie les NULL en dernier et SQLite en premier : les jamais-synchronisés sont donc lus d'abord, explicitement.
  */
-export async function reconcileDueSubscriptions(opts: { now?: Date; limit?: number } = {}, gw: StripeGateway = gateway): Promise<{ checked: number; updated: number; failed: number; busy: number }> {
-  const now = opts.now ?? new Date(), limit = opts.limit ?? 50;
+export async function reconcileDueSubscriptions(opts: { now?: Date; limit?: number; budgetMs?: number; itemReserveMs?: number; maxConsecutiveFailures?: number } = {}, gw: StripeGateway = gateway): Promise<ReconcileSummary> {
+  const now = opts.now ?? new Date(), limit = opts.limit ?? 50, budget = opts.budgetMs ?? 90_000, reserve = opts.itemReserveMs ?? 30_000, maxFail = opts.maxConsecutiveFailures ?? 3;
+  const startedAt = Date.now();
+  const total = await db.subscription.count({ where: reconcileWhere(now) });
   const never = await db.subscription.findMany({ where: reconcileWhere(now, { stripeSyncedAt: null }), orderBy: { createdAt: "asc" }, take: limit });
   const rest = never.length < limit ? await db.subscription.findMany({ where: reconcileWhere(now, { stripeSyncedAt: { not: null } }), orderBy: { stripeSyncedAt: "asc" }, take: limit - never.length }) : [];
+  const list = [...never, ...rest];
   const sum = { checked: 0, updated: 0, failed: 0, busy: 0 };
-  for (const s of [...never, ...rest]) {
+  let stoppedBy: ReconcileSummary["stoppedBy"] = null, consecutive = 0, i = 0;
+  for (; i < list.length; i++) {
+    if (Date.now() - startedAt + reserve > budget) { stoppedBy = "budget"; break; }
+    if (consecutive >= maxFail) { stoppedBy = "stripe_unavailable"; break; }
+    const s = list[i];
     sum.checked++;
-    try { const r = await syncFromStripe(s, s.stripeSubscriptionId!, gw, "reconcile", { missingIsCanceled: true, waitMs: 2_000 }); if (r.outcome === "handled") sum.updated++; }
-    catch (e) { if (e instanceof SyncBusyError) sum.busy++; else { sum.failed++; log.warn("billing.reconcile_failed", { workspaceId: s.workspaceId, error: errMsg(e) }); } }
+    try { const r = await syncFromStripe(s, s.stripeSubscriptionId!, gw, "reconcile", { missingIsCanceled: true, waitMs: 2_000 }); consecutive = 0; if (r.outcome === "handled") sum.updated++; }
+    catch (e) {
+      if (e instanceof SyncBusyError) sum.busy++;
+      else { sum.failed++; consecutive++; log.warn("billing.reconcile_failed", { workspaceId: s.workspaceId, error: errMsg(e) }); }
+    }
   }
-  return sum;
+  const deferred = list.length - i, remaining = Math.max(0, total - sum.checked);
+  const complete = !stoppedBy && sum.failed === 0 && sum.busy === 0 && remaining === 0;
+  const out: ReconcileSummary = { ...sum, deferred, remaining, complete, stoppedBy };
+  if (!complete) log.warn("billing.reconcile_incomplete", { ...out, budgetMs: budget, elapsedMs: Date.now() - startedAt });
+  else if (sum.checked > 0) log.info("billing.reconcile_done", { ...out, elapsedMs: Date.now() - startedAt });
+  return out;
 }
 
 const idOf = (v: unknown): string | undefined => (typeof v === "string" ? v : v && typeof v === "object" && typeof (v as { id?: unknown }).id === "string" ? (v as { id: string }).id : undefined);

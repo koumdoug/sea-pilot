@@ -5,7 +5,7 @@ import { decryptJson, encryptJson, signToken, verifyToken } from "../crypto";
 import { audit } from "../audit";
 import { log, errMsg } from "../logger";
 import { entitlementForWorkspace } from "../free-access";
-import { limitReached } from "../plans";
+import { UNLIMITED, limitReached } from "../plans";
 import { workspaceUsage } from "../billing";
 import { withWorkspaceLock } from "../quota";
 import { PROVIDERS, PROVIDER_ORDER } from "./providers";
@@ -118,7 +118,48 @@ const iso = (d: Date) => d.toISOString().slice(0, 10);
 export function lastDaysRange(days: number, now = new Date()): DateRange { return { from: iso(new Date(now.getTime() - (days - 1) * 86_400_000)), to: iso(now) }; }
 
 /** Synchronise les métriques publicitaires d'une plateforme (upsert idempotent). */
+/**
+ * Droit de SYNCHRONISER une intégration (appels aux API publicitaires, import de métriques), distinct de la CONNEXION conservée et des DONNÉES historiques :
+ *  - abonnement inactif (essai expiré, terminé, impayé) : synchronisation suspendue ;
+ *  - au-delà de la limite d'intégrations du forfait (après une rétrogradation) : seules les plus anciennes (par création) sont synchronisées.
+ * Rien n'est supprimé : la connexion OAuth, les identifiants chiffrés et les métriques déjà importées restent, et la synchronisation reprend dès que le droit revient.
+ * L'espace propriétaire exempté dispose des droits Pro (toutes les intégrations, sans abonnement).
+ */
+export async function integrationSyncAllowance(workspaceId: string, provider: string): Promise<{ allowed: true } | { allowed: false; reason: "inactive" | "over_limit"; message: string }> {
+  const ent = await entitlementForWorkspace(workspaceId, await db.subscription.findUnique({ where: { workspaceId } }));
+  if (!ent.active) return { allowed: false, reason: "inactive", message: "Abonnement inactif : la synchronisation est suspendue (votre connexion et vos données sont conservées). Elle reprend dès la réactivation." };
+  const limit = ent.plan.limits.integrations;
+  if (limit !== UNLIMITED) {
+    const rows = await db.integration.findMany({ where: { workspaceId, status: { not: "disconnected" } }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], select: { provider: true } });
+    if (rows.findIndex((r) => r.provider === provider) >= limit) return { allowed: false, reason: "over_limit", message: `Votre forfait inclut ${limit} intégration${limit > 1 ? "s" : ""} : cette connexion est conservée, mais sa synchronisation est suspendue tant que le forfait ne la couvre pas.` };
+  }
+  return { allowed: true };
+}
+
+/** Synchronisations que la tâche planifiée a le droit de lancer maintenant (voir integrationSyncAllowance), avec le décompte de ce qui est écarté. */
+export async function listSyncableIntegrations(): Promise<{ allowed: { workspaceId: string; provider: string }[]; skippedInactive: number; skippedOverLimit: number }> {
+  const rows = await db.integration.findMany({ where: { status: { not: "disconnected" } }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], select: { workspaceId: true, provider: true, status: true } });
+  const byWorkspace = new Map<string, typeof rows>();
+  for (const r of rows) byWorkspace.set(r.workspaceId, [...(byWorkspace.get(r.workspaceId) ?? []), r]);
+  const subs = new Map((await db.subscription.findMany({ where: { workspaceId: { in: [...byWorkspace.keys()] } } })).map((s) => [s.workspaceId, s]));
+  const out = { allowed: [] as { workspaceId: string; provider: string }[], skippedInactive: 0, skippedOverLimit: 0 };
+  for (const [workspaceId, list] of byWorkspace) {
+    const targets = list.filter((r) => r.status === "connected" && PROVIDERS[r.provider]?.fetchMetrics);
+    if (!targets.length) continue;
+    const ent = await entitlementForWorkspace(workspaceId, subs.get(workspaceId) ?? null);
+    if (!ent.active) { out.skippedInactive += targets.length; continue; }
+    const limit = ent.plan.limits.integrations;
+    for (const t of targets) {
+      if (limit === UNLIMITED || list.findIndex((r) => r.provider === t.provider) < limit) out.allowed.push({ workspaceId, provider: t.provider });
+      else out.skippedOverLimit++;
+    }
+  }
+  return out;
+}
+
 export async function syncIntegration(workspaceId: string, provider: string, range: DateRange = lastDaysRange(30)): Promise<{ rows: number; campaigns: number }> {
+  const allowance = await integrationSyncAllowance(workspaceId, provider);
+  if (!allowance.allowed) throw new IntegrationError(allowance.message);
   const row = await db.integration.findUnique({ where: { workspaceId_provider: { workspaceId, provider } } });
   const p = PROVIDERS[provider];
   if (!row || !p?.fetchMetrics || row.status === "disconnected") throw new IntegrationError("Intégration non connectée ou sans synchronisation.");

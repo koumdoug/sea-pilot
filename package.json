@@ -9,6 +9,7 @@
     "postinstall": "node scripts/prisma-generate.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
+    "test:pg": "vitest run --config vitest.pg.config.mts",
     "test": "vitest run",
     "test:e2e": "playwright test",
     "db:push": "prisma db push",

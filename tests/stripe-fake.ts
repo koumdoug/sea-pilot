@@ -47,11 +47,12 @@ export class FakeStripe implements StripeGateway {
   }
   async getSubscription(id: string) {
     this.takeFailure("getSubscription");
-    await this.gate(`getSubscription:${id}`);
+    // La lecture est « en cours » pendant TOUTE sa durée (latence simulée comprise) : deux lectures qui se chevauchent sont comptées.
     const n = (this.activeReads.get(id) ?? 0) + 1;
     this.activeReads.set(id, n);
     this.maxConcurrentReads = Math.max(this.maxConcurrentReads, n);
     try {
+      await this.gate(`getSubscription:${id}`);
       const s = this.subs.get(id), snapshot = s ? structuredClone(s) : null; // l'état est capturé ICI (instant de traitement chez Stripe)
       const hold = this.holds.shift();
       if (hold) { hold.entered(); await hold.released; }

@@ -5,6 +5,7 @@ import { processDueFollowUps } from "@/lib/followups";
 import { syncIntegration } from "@/lib/integrations/service";
 import { PROVIDERS } from "@/lib/integrations/providers";
 import { log, errMsg } from "@/lib/logger";
+import { reconcileDueSubscriptions, stripeConfigured } from "@/lib/billing";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -29,7 +30,12 @@ async function handle(req: Request) {
       try { await syncIntegration(i.workspaceId, i.provider); syncs.push({ ...i, ok: true }); } catch (e) { log.warn("cron.sync_failed", { provider: i.provider, error: errMsg(e) }); syncs.push({ ...i, ok: false }); }
     }
   }
-  return Response.json({ followups, syncs: syncs.length, syncErrors: syncs.filter((s) => !s.ok).length });
+  // Réconciliation des abonnements payants avec Stripe (événements perdus) : une panne de Stripe n'empêche pas le reste de la tâche et ne modifie aucun droit.
+  let billing: { checked: number; updated: number; failed: number } | { skipped: true } = { skipped: true };
+  if (url.searchParams.get("reconcile") !== "0" && stripeConfigured()) {
+    try { billing = await reconcileDueSubscriptions(); } catch (e) { log.warn("cron.reconcile_failed", { error: errMsg(e) }); billing = { checked: 0, updated: 0, failed: 1 }; }
+  }
+  return Response.json({ followups, syncs: syncs.length, syncErrors: syncs.filter((s) => !s.ok).length, billing });
 }
 
 export const GET = handle;

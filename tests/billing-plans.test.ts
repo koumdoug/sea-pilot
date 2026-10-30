@@ -30,12 +30,13 @@ import { env } from "@/lib/env";
 import { PLAN_IDS } from "@/lib/constants";
 import { LIVE_SUBSCRIPTION_STATES, PLANS, UNLIMITED, describePlan, entitlement, isLiveSubscription, limitReached, limitText, type Entitlement } from "@/lib/plans";
 import { entitlementForWorkspace } from "@/lib/free-access";
-import { BillingError, changePaidPlan, createCheckoutSession, createPortalSession, handleStripeEvent, planCheckoutReady, selectTrialPlan, setCancelAtPeriodEnd, stripeSetup, workspaceUsage, type StripeEvent } from "@/lib/billing";
+import { BillingError, changePaidPlan, createCheckoutSession, createPortalSession, planCheckoutReady, selectTrialPlan, setStripeGateway, setCancelAtPeriodEnd, stripeSetup, workspaceUsage, type StripeEvent } from "@/lib/billing";
 import { billingStatus, manageActions, planActions } from "@/lib/billing-ui";
 import { transitionCampaign } from "@/lib/campaigns";
 import { POST as webhook } from "@/app/api/stripe/webhook/route";
 import { cancelAction, changePlanAction, checkoutAction, portalAction, selectTrialPlanAction } from "../src/app/(app)/billing/actions";
 import { makeWorkspace, resetDb } from "./helpers";
+import { deliver, fake } from "./stripe-fake";
 
 const DAY = 86_400_000;
 const SAVED = ["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "FREE_ACCESS_USER_IDS", "STRIPE_PRICE_STARTER", "STRIPE_PRICE_GROWTH", "STRIPE_PRICE_PRO"] as const;
@@ -148,11 +149,11 @@ describe("17. restrictions d'accès réellement appliquées selon le forfait", (
 
 describe("7-9. changements de forfait : appliqués uniquement à la confirmation de Stripe", () => {
   const link = async (workspaceId: string, customer = "cus_1") => { await db.subscription.update({ where: { workspaceId }, data: { stripeCustomerId: customer } }); };
-  const confirm = (workspaceId: string, plan: "starter" | "growth" | "pro", subId = "sub_1", customer = "cus_1") => handleStripeEvent(ev("customer.subscription.updated", subObj(workspaceId, plan, {}, subId, customer)));
+  const confirm = (workspaceId: string, plan: "starter" | "growth" | "pro", subId = "sub_1", customer = "cus_1") => deliver(ev("customer.subscription.updated", subObj(workspaceId, plan, {}, subId, customer)));
 
   it("7. Starter → Growth : le paiement confirmé par Stripe attribue Growth ; avant, rien ne change", async () => {
     const { workspaceId } = await makeWorkspace(); await link(workspaceId);
-    await handleStripeEvent(ev("checkout.session.completed", { client_reference_id: workspaceId, customer: "cus_1", subscription: "sub_1" }));
+    await deliver(ev("checkout.session.completed", { client_reference_id: workspaceId, customer: "cus_1", subscription: "sub_1" }));
     expect(await sub(workspaceId)).toMatchObject({ plan: "starter", status: "trialing", stripeSubscriptionId: "sub_1" }); // lien seulement : aucun droit payant
     expect((await entOf(workspaceId)).state).toBe("trial");
     await confirm(workspaceId, "growth");
@@ -182,7 +183,7 @@ describe("7-9. changements de forfait : appliqués uniquement à la confirmation
   it("6. fin d'abonnement : aucun repli automatique vers un Starter gratuit — l'accès est suspendu (règle commerciale existante)", async () => {
     const { workspaceId } = await makeWorkspace(); await link(workspaceId);
     await confirm(workspaceId, "pro");
-    await handleStripeEvent(ev("customer.subscription.deleted", subObj(workspaceId, "pro", { status: "canceled" })));
+    await deliver(ev("customer.subscription.deleted", subObj(workspaceId, "pro", { status: "canceled" })));
     const e = await entOf(workspaceId);
     expect(e).toMatchObject({ active: false, state: "canceled" });
     expect((await sub(workspaceId)).plan).toBe("pro"); // conservé pour mémoire, sans aucun droit
@@ -190,16 +191,16 @@ describe("7-9. changements de forfait : appliqués uniquement à la confirmation
   it("réabonnement après résiliation : le nouvel abonnement Stripe remplace l'ancien", async () => {
     const { workspaceId } = await makeWorkspace(); await link(workspaceId);
     await confirm(workspaceId, "growth", "sub_old");
-    await handleStripeEvent(ev("customer.subscription.deleted", subObj(workspaceId, "growth", { status: "canceled" }, "sub_old")));
+    await deliver(ev("customer.subscription.deleted", subObj(workspaceId, "growth", { status: "canceled" }, "sub_old")));
     await confirm(workspaceId, "pro", "sub_new");
     expect(await sub(workspaceId)).toMatchObject({ plan: "pro", status: "active", stripeSubscriptionId: "sub_new" });
   });
   it("un événement d'un ancien abonnement n'écrase jamais l'abonnement courant", async () => {
     const { workspaceId } = await makeWorkspace(); await link(workspaceId);
     await confirm(workspaceId, "pro", "sub_new");
-    expect((await handleStripeEvent(ev("customer.subscription.deleted", subObj(workspaceId, "growth", { status: "canceled" }, "sub_old")))).handled).toBe(false);
+    expect((await deliver(ev("customer.subscription.deleted", subObj(workspaceId, "growth", { status: "canceled" }, "sub_old")))).handled).toBe(false);
     expect(await sub(workspaceId)).toMatchObject({ plan: "pro", status: "active", stripeSubscriptionId: "sub_new" });
-    expect((await handleStripeEvent(ev("invoice.payment_failed", { customer: "cus_1", subscription: "sub_old" }))).handled).toBe(false);
+    expect((await deliver(ev("invoice.payment_failed", { customer: "cus_1", subscription: "sub_old" }))).handled).toBe(false);
     expect((await sub(workspaceId)).status).toBe("active");
   });
 });
@@ -231,52 +232,54 @@ describe("12-14. paiement Stripe : confirmé, refusé, webhook reçu plusieurs f
   const link = (workspaceId: string) => db.subscription.update({ where: { workspaceId }, data: { stripeCustomerId: "cus_1" } });
   it("12. paiement confirmé : abonnement actif au forfait du prix Stripe, période de facturation enregistrée", async () => {
     const { workspaceId } = await makeWorkspace(); await link(workspaceId);
-    await handleStripeEvent(ev("customer.subscription.created", subObj(workspaceId, "growth")));
-    await handleStripeEvent(ev("invoice.paid", { customer: "cus_1", subscription: "sub_1" }));
+    await deliver(ev("customer.subscription.created", subObj(workspaceId, "growth")));
+    await deliver(ev("invoice.paid", { customer: "cus_1", subscription: "sub_1" }));
     const s = await sub(workspaceId);
     expect([s.plan, s.status]).toEqual(["growth", "active"]);
     expect(s.currentPeriodEnd!.getTime()).toBeGreaterThan(Date.now());
   });
   it("13. paiement refusé : un premier paiement non abouti n'attribue aucun forfait et ne retire pas l'essai valide", async () => {
     const { workspaceId } = await makeWorkspace(); await link(workspaceId);
-    await handleStripeEvent(ev("customer.subscription.created", subObj(workspaceId, "pro", { status: "incomplete" })));
+    await deliver(ev("customer.subscription.created", subObj(workspaceId, "pro", { status: "incomplete" })));
     expect(await sub(workspaceId)).toMatchObject({ plan: "starter", status: "trialing" });
-    expect((await handleStripeEvent(ev("invoice.payment_failed", { customer: "cus_1", subscription: "sub_1" }))).handled).toBe(false);
+    expect((await deliver(ev("invoice.payment_failed", { customer: "cus_1", subscription: "sub_1" }))).handled).toBe(false);
     expect(await sub(workspaceId)).toMatchObject({ plan: "starter", status: "trialing" });
     expect(await entOf(workspaceId)).toMatchObject({ active: true, state: "trial" });
   });
   it("13 bis. paiement refusé sur un abonnement payant : « paiement en échec » (grâce de 7 jours), le forfait est conservé ; reprise à la facture payée", async () => {
     const { workspaceId } = await makeWorkspace(); await link(workspaceId);
-    await handleStripeEvent(ev("customer.subscription.updated", subObj(workspaceId, "growth")));
-    await handleStripeEvent(ev("invoice.payment_failed", { customer: "cus_1", subscription: "sub_1" }));
+    await deliver(ev("customer.subscription.updated", subObj(workspaceId, "growth")));
+    await deliver(ev("invoice.payment_failed", { customer: "cus_1", subscription: "sub_1" }));
     expect(await sub(workspaceId)).toMatchObject({ plan: "growth", status: "past_due" });
     expect(await entOf(workspaceId)).toMatchObject({ active: true, state: "past_due" });
-    await handleStripeEvent(ev("invoice.paid", { customer: "cus_1", subscription: "sub_1" }));
+    await deliver(ev("invoice.paid", { customer: "cus_1", subscription: "sub_1" }));
     expect((await sub(workspaceId)).status).toBe("active");
   });
   it("une facture payée ne réactive pas un abonnement terminé", async () => {
     const { workspaceId } = await makeWorkspace(); await link(workspaceId);
-    await handleStripeEvent(ev("customer.subscription.updated", subObj(workspaceId, "pro")));
-    await handleStripeEvent(ev("customer.subscription.deleted", subObj(workspaceId, "pro", { status: "canceled" })));
-    expect((await handleStripeEvent(ev("invoice.paid", { customer: "cus_1", subscription: "sub_1" }))).handled).toBe(false);
+    await deliver(ev("customer.subscription.updated", subObj(workspaceId, "pro")));
+    await deliver(ev("customer.subscription.deleted", subObj(workspaceId, "pro", { status: "canceled" })));
+    expect((await deliver(ev("invoice.paid", { customer: "cus_1", subscription: "sub_1" }))).handled).toBe(false);
     expect((await sub(workspaceId)).status).toBe("canceled");
   });
   it("14. webhook reçu plusieurs fois : traité une seule fois ; un ancien événement rejoué n'annule pas un changement plus récent", async () => {
     const { workspaceId } = await makeWorkspace(); await link(workspaceId);
     const a = ev("customer.subscription.updated", subObj(workspaceId, "growth"), "evt_A");
     const b = ev("customer.subscription.updated", subObj(workspaceId, "pro"), "evt_B");
-    expect(await handleStripeEvent(a)).toEqual({ handled: true });
-    expect(await handleStripeEvent(a)).toEqual({ handled: false, duplicate: true });
-    expect(await handleStripeEvent(a)).toEqual({ handled: false, duplicate: true });
-    await handleStripeEvent(b);
-    await handleStripeEvent(a); // rejeu tardif de l'ancien événement
+    expect(await deliver(a)).toEqual({ handled: true });
+    expect(await deliver(a)).toEqual({ handled: false, duplicate: true });
+    expect(await deliver(a)).toEqual({ handled: false, duplicate: true });
+    await deliver(b);
+    await deliver(a); // rejeu tardif de l'ancien événement
     expect((await sub(workspaceId)).plan).toBe("pro");
     expect(await db.auditLog.count({ where: { action: "billing.stripe_event", entityId: "evt_A" } })).toBe(1);
   });
   it("route webhook : le même événement envoyé deux fois répond 200 les deux fois, sans second effet", async () => {
     const { workspaceId } = await makeWorkspace(); await link(workspaceId);
     process.env.STRIPE_WEBHOOK_SECRET = "whsec_x";
-    const payload = JSON.stringify(ev("customer.subscription.updated", subObj(workspaceId, "growth"), "evt_route"));
+    const routeEvent = ev("customer.subscription.updated", subObj(workspaceId, "growth"), "evt_route");
+    const payload = JSON.stringify(routeEvent);
+    setStripeGateway(fake); fake.mirror(routeEvent); // état réel chez Stripe : celui de l'événement
     const send = async () => webhook(new Request("http://x/api/stripe/webhook", { method: "POST", headers: { "stripe-signature": await sign(payload, "whsec_x") }, body: payload }));
     const r1 = await (await send()).json(), r2 = await (await send()).json();
     expect(r1).toMatchObject({ received: true, handled: true });
@@ -414,20 +417,20 @@ describe("isolation : un changement de forfait chez un client ne modifie jamais 
     await db.subscription.update({ where: { workspaceId: a.workspaceId }, data: { stripeCustomerId: "cus_a" } });
     await db.subscription.update({ where: { workspaceId: b.workspaceId }, data: { stripeCustomerId: "cus_b" } });
     const before = { b: await sub(b.workspaceId), c: await sub(c.workspaceId) };
-    await handleStripeEvent(ev("customer.subscription.updated", subObj(a.workspaceId, "pro", {}, "sub_a", "cus_a")));
-    await handleStripeEvent(ev("invoice.payment_failed", { customer: "cus_a", subscription: "sub_a" }));
+    await deliver(ev("customer.subscription.updated", subObj(a.workspaceId, "pro", {}, "sub_a", "cus_a")));
+    await deliver(ev("invoice.payment_failed", { customer: "cus_a", subscription: "sub_a" }));
     await selectTrialPlan(c.workspaceId, "growth");
     expect((await sub(a.workspaceId))).toMatchObject({ plan: "pro", status: "past_due" });
     expect(await sub(b.workspaceId)).toEqual(before.b);
     expect({ ...(await sub(c.workspaceId)), plan: "x", updatedAt: null }).toEqual({ ...before.c, plan: "x", updatedAt: null });
     expect((await sub(c.workspaceId)).plan).toBe("growth");
-    await handleStripeEvent(ev("customer.subscription.deleted", subObj(a.workspaceId, "pro", { status: "canceled" }, "sub_a", "cus_a")));
+    await deliver(ev("customer.subscription.deleted", subObj(a.workspaceId, "pro", { status: "canceled" }, "sub_a", "cus_a")));
     expect(await sub(b.workspaceId)).toEqual(before.b);
   });
   it("un événement d'un client inconnu ou d'un autre abonnement ne touche aucune organisation", async () => {
     const a = await makeWorkspace(); await db.subscription.update({ where: { workspaceId: a.workspaceId }, data: { stripeCustomerId: "cus_a" } });
     const before = await sub(a.workspaceId);
-    expect((await handleStripeEvent(ev("customer.subscription.updated", { id: "sub_x", customer: "cus_inconnu", status: "active", metadata: {}, items: { data: [{ price: { id: "price_pro_test" } }] } }))).handled).toBe(false);
+    expect((await deliver(ev("customer.subscription.updated", { id: "sub_x", customer: "cus_inconnu", status: "active", metadata: {}, items: { data: [{ price: { id: "price_pro_test" } }] } }))).handled).toBe(false);
     expect(await sub(a.workspaceId)).toEqual(before);
   });
 });

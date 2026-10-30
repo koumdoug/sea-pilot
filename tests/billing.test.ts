@@ -1,11 +1,12 @@
 import { createHmac } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "@/lib/db";
-import { BillingError, changePaidPlan, createCheckoutSession, currentMonthStartUtc, handleStripeEvent, planFromPriceId, selectTrialPlan, setCancelAtPeriodEnd, stripeConfigured, verifyStripeSignature, workspaceUsage } from "@/lib/billing";
+import { BillingError, changePaidPlan, createCheckoutSession, currentMonthStartUtc, planFromPriceId, setStripeGateway, selectTrialPlan, setCancelAtPeriodEnd, stripeConfigured, verifyStripeSignature, workspaceUsage } from "@/lib/billing";
 import { createLead, eraseLead } from "@/lib/leads";
 import { entitlement } from "@/lib/plans";
 import { POST as webhook } from "@/app/api/stripe/webhook/route";
 import { makeWorkspace, resetDb } from "./helpers";
+import { deliver, fake } from "./stripe-fake";
 
 beforeEach(resetDb);
 afterEach(() => { delete process.env.STRIPE_SECRET_KEY; delete process.env.STRIPE_WEBHOOK_SECRET; vi.restoreAllMocks(); });
@@ -125,23 +126,23 @@ describe("webhook Stripe → état de l'abonnement (idempotent)", () => {
   it("subscription.updated : plan déduit du prix, statut actif, fin de période", async () => {
     const { workspaceId } = await setup();
     expect(planFromPriceId("price_pro_test")).toBe("pro");
-    expect((await handleStripeEvent(subEvent(workspaceId))).handled).toBe(true);
+    expect((await deliver(subEvent(workspaceId))).handled).toBe(true);
     const s = await db.subscription.findUniqueOrThrow({ where: { workspaceId } });
     expect([s.plan, s.status, s.stripeSubscriptionId, s.cancelAtPeriodEnd]).toEqual(["growth", "active", "sub_1", false]);
     expect(entitlement(s).state).toBe("paid");
-    await handleStripeEvent(subEvent(workspaceId)); // un nouvel événement identique ne change rien
+    await deliver(subEvent(workspaceId)); // un nouvel événement identique ne change rien
     expect((await db.subscription.findUniqueOrThrow({ where: { workspaceId } })).plan).toBe("growth");
   });
 
   it("résiliation programmée, échec de paiement, suppression", async () => {
     const { workspaceId } = await setup();
-    await handleStripeEvent(subEvent(workspaceId, { cancel_at_period_end: true }));
+    await deliver(subEvent(workspaceId, { cancel_at_period_end: true }));
     expect(entitlement(await db.subscription.findUniqueOrThrow({ where: { workspaceId } })).state).toBe("canceling");
-    await handleStripeEvent({ id: "e2", type: "invoice.payment_failed", data: { object: { customer: "cus_1", subscription: "sub_1" } } });
+    await deliver({ id: "e2", type: "invoice.payment_failed", data: { object: { customer: "cus_1", subscription: "sub_1" } } });
     expect((await db.subscription.findUniqueOrThrow({ where: { workspaceId } })).status).toBe("past_due");
-    await handleStripeEvent({ id: "e3", type: "invoice.paid", data: { object: { customer: "cus_1", subscription: "sub_1" } } });
+    await deliver({ id: "e3", type: "invoice.paid", data: { object: { customer: "cus_1", subscription: "sub_1" } } });
     expect((await db.subscription.findUniqueOrThrow({ where: { workspaceId } })).status).toBe("active");
-    await handleStripeEvent(subEvent(workspaceId, { status: "canceled" }, "customer.subscription.deleted"));
+    await deliver(subEvent(workspaceId, { status: "canceled" }, "customer.subscription.deleted"));
     const s = await db.subscription.findUniqueOrThrow({ where: { workspaceId } });
     expect(s.status).toBe("canceled");
     expect(entitlement(s).active).toBe(false);
@@ -149,16 +150,18 @@ describe("webhook Stripe → état de l'abonnement (idempotent)", () => {
 
   it("checkout.session.completed relie client et abonnement ; événement d'un client inconnu ignoré", async () => {
     const { workspaceId } = await makeWorkspace();
-    await handleStripeEvent({ id: "e_checkout", type: "checkout.session.completed", data: { object: { client_reference_id: workspaceId, customer: "cus_9", subscription: "sub_9" } } });
+    await deliver({ id: "e_checkout", type: "checkout.session.completed", data: { object: { client_reference_id: workspaceId, customer: "cus_9", subscription: "sub_9" } } });
     const s = await db.subscription.findUniqueOrThrow({ where: { workspaceId } });
     expect([s.stripeCustomerId, s.stripeSubscriptionId]).toEqual(["cus_9", "sub_9"]);
-    expect((await handleStripeEvent({ id: "e_unknown_customer", type: "invoice.paid", data: { object: { customer: "inconnu" } } })).handled).toBe(false);
-    expect((await handleStripeEvent({ id: "e_unknown_type", type: "type.inconnu", data: { object: {} } })).handled).toBe(false);
+    expect((await deliver({ id: "e_unknown_customer", type: "invoice.paid", data: { object: { customer: "inconnu" } } })).handled).toBe(false);
+    expect((await deliver({ id: "e_unknown_type", type: "type.inconnu", data: { object: {} } })).handled).toBe(false);
   });
 
   it("route webhook : 503 sans secret, 400 signature invalide, 200 valide", async () => {
     const { workspaceId } = await setup();
-    const payload = JSON.stringify(subEvent(workspaceId));
+    const evt = subEvent(workspaceId);
+    const payload = JSON.stringify(evt);
+    setStripeGateway(fake); fake.mirror(evt); // état réel chez Stripe : celui de l'événement
     const req = (sig: string | null) => new Request("http://x/api/stripe/webhook", { method: "POST", headers: sig ? { "stripe-signature": sig } : {}, body: payload });
     expect((await webhook(req(null))).status).toBe(503);
     process.env.STRIPE_WEBHOOK_SECRET = "whsec_test";
@@ -171,7 +174,7 @@ describe("webhook Stripe → état de l'abonnement (idempotent)", () => {
 
   it("changement de plan payant : appels Stripe attendus (mock), downgrade bloqué si usage trop élevé", async () => {
     const { workspaceId } = await setup();
-    await handleStripeEvent(subEvent(workspaceId));
+    await deliver(subEvent(workspaceId));
     process.env.STRIPE_SECRET_KEY = "sk_test_x";
     const calls: { url: string; body?: string }[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
@@ -183,7 +186,7 @@ describe("webhook Stripe → état de l'abonnement (idempotent)", () => {
     expect(calls[1].body).toContain("items%5B0%5D%5Bprice%5D=price_pro_test");
     // La demande à Stripe ne modifie PAS le forfait local : il change à l'événement de confirmation.
     expect((await db.subscription.findUniqueOrThrow({ where: { workspaceId } })).plan).toBe("growth");
-    await handleStripeEvent(subEvent(workspaceId, { items: { data: [{ price: { id: "price_pro_test" } }] }, metadata: { workspaceId, plan: "pro" } }));
+    await deliver(subEvent(workspaceId, { items: { data: [{ price: { id: "price_pro_test" } }] }, metadata: { workspaceId, plan: "pro" } }));
     expect((await db.subscription.findUniqueOrThrow({ where: { workspaceId } })).plan).toBe("pro");
     for (let i = 0; i < 5; i++) await db.landingPage.create({ data: { workspaceId, name: `P${i}`, slug: `p${i}`, sections: [] } });
     await expect(changePaidPlan(workspaceId, "starter")).rejects.toThrow(/dépasse les limites/);

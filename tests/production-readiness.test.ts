@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "@/lib/db";
 import { sha256, randomToken } from "@/lib/crypto";
 import { resetPasswordAction } from "@/app/(auth)/actions";
-import { createCheckoutSession, createPortalSession, handleStripeEvent, setCancelAtPeriodEnd } from "@/lib/billing";
+import { createCheckoutSession, createPortalSession, setCancelAtPeriodEnd } from "@/lib/billing";
 import { createLead, unsubscribeLead } from "@/lib/leads";
 import { enrollLead, processDueFollowUps } from "@/lib/followups";
 import { setEmailProviderForTests, type EmailProvider, type OutgoingEmail } from "@/lib/email";
@@ -10,6 +10,7 @@ import { verifyPassword } from "@/lib/auth";
 import { POST as apiLead } from "@/app/api/v1/leads/route";
 import { entitlement } from "@/lib/plans";
 import { makeWorkspace, resetDb } from "./helpers";
+import { deliver } from "./stripe-fake";
 
 beforeEach(resetDb);
 afterEach(() => { vi.restoreAllMocks(); setEmailProviderForTests(null); delete process.env.STRIPE_SECRET_KEY; delete process.env.STRIPE_WEBHOOK_SECRET; });
@@ -92,7 +93,7 @@ describe("Stripe : checkout, portail, annulation, reprise (réponses simulées)"
     const a = await makeWorkspace("A");
     const b = await makeWorkspace("B");
     await db.subscription.update({ where: { workspaceId: a.workspaceId }, data: { stripeCustomerId: "cus_A", stripeSubscriptionId: "sub_A", status: "active", plan: "pro" } });
-    await handleStripeEvent({ id: "e", type: "customer.subscription.deleted", data: { object: { id: "sub_B_inconnu", customer: "cus_B_inconnu", status: "canceled", metadata: { workspaceId: b.workspaceId } } } });
+    await deliver({ id: "e", type: "customer.subscription.deleted", data: { object: { id: "sub_B_inconnu", customer: "cus_B_inconnu", status: "canceled", metadata: { workspaceId: b.workspaceId } } } });
     expect((await db.subscription.findUniqueOrThrow({ where: { workspaceId: a.workspaceId } })).status).toBe("active");
   });
 });

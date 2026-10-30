@@ -96,11 +96,14 @@ export type Entitlement = {
 };
 
 const DAY = 86_400_000;
+/** Délai accordé après la fin d'une période payée pour recevoir la confirmation du renouvellement (jamais appliqué à une résiliation programmée). */
+export const RENEWAL_GRACE_MS = 3 * DAY;
 
 /**
  * Règle d'accès selon l'abonnement :
  *  - trialing : accès jusqu'à trialEndsAt (ensuite « essai expiré », accès bloqué hors Billing)
- *  - active : accès ; si cancelAtPeriodEnd, accès jusqu'à currentPeriodEnd
+ *  - active : accès ; si cancelAtPeriodEnd, accès jusqu'à currentPeriodEnd exactement ; sinon accès tant que la période payée n'est pas échue depuis plus de RENEWAL_GRACE_MS
+ *    (délai de confirmation du renouvellement : au-delà, seule une réconciliation avec Stripe peut rétablir l'accès — jamais d'accès illimité sur un statut local ancien)
  *  - past_due : accès conservé (délai de grâce de 7 jours après la fin de période)
  *  - canceled / expired / incomplete : accès bloqué
  */
@@ -120,6 +123,10 @@ export function entitlement(sub: SubscriptionLike | null, now = new Date()): Ent
       const ok = !sub.currentPeriodEnd || sub.currentPeriodEnd.getTime() > now.getTime();
       return ok ? { active: true, state: "canceling", plan, daysLeft: left(sub.currentPeriodEnd) } : { active: false, state: "canceled", plan, daysLeft: 0, reason: "Abonnement résilié." };
     }
+    // Période payée échue sans aucune confirmation de renouvellement ni de résiliation (événements Stripe perdus) : un statut local ancien
+    // n'ouvre pas un accès illimité. La période payée est respectée jusqu'à son terme, plus un délai pour le renouvellement ; passé ce délai,
+    // seule une synchronisation avec Stripe (réconciliation) peut rétablir l'accès.
+    if (sub.currentPeriodEnd && sub.currentPeriodEnd.getTime() + RENEWAL_GRACE_MS <= now.getTime()) return { active: false, state: "canceled", plan, daysLeft: 0, reason: "La période payée est échue et le renouvellement n'a pas été confirmé par Stripe. Si vous avez payé, l'accès sera rétabli dès la synchronisation ; sinon, souscrivez à un forfait." };
     return { active: true, state: "paid", plan, daysLeft: left(sub.currentPeriodEnd) };
   }
   if (status === "past_due") {

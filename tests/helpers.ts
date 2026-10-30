@@ -1,11 +1,16 @@
 import { db } from "@/lib/db";
 import { createWorkspace } from "@/lib/workspaces";
 import { resetRateLimits } from "@/lib/rate-limit";
+import { fake } from "./stripe-fake";
+import { setStripeGateway } from "@/lib/billing";
 
 export async function resetDb() {
   resetRateLimits();
   // l'ordre n'a pas d'importance : les suppressions en cascade partent des racines
   await db.auditLog.deleteMany();
+  await db.stripeEvent.deleteMany();
+  fake.reset();
+  setStripeGateway(null); // passerelle Stripe réelle par défaut : un test qui la remplace le fait explicitement
   await db.workspace.deleteMany();
   await db.user.deleteMany();
 }

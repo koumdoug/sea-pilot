@@ -148,9 +148,34 @@ model Subscription {
   canceledAt           DateTime?
   stripeCustomerId     String?   @unique
   stripeSubscriptionId String?   @unique
+  // Dernière synchronisation de l'état depuis Stripe : une synchronisation plus ancienne n'écrase jamais une plus récente.
+  stripeSyncedAt        DateTime?
+  // Réservation d'une tentative de souscription (une seule session de paiement ouverte par espace, quel que soit le serveur).
+  checkoutReservationId String?
+  checkoutReservedUntil DateTime?
+  checkoutSessionId     String?
   createdAt            DateTime  @default(now())
   updatedAt            DateTime  @updatedAt
   workspace            Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+}
+
+// Registre des événements Stripe reçus : l'identifiant d'événement (clé primaire) rend la prise en charge atomique entre serveurs.
+// status : processing (réservé, bail `lockedUntil`) | processed | failed. Un événement `failed` ou au bail expiré peut être repris.
+model StripeEvent {
+  id          String    @id
+  type        String
+  status      String    @default("processing")
+  attempts    Int       @default(1)
+  lockedUntil DateTime?
+  workspaceId String?
+  outcome     String? // handled | ignored | needs_review
+  note        String?
+  error       String?
+  receivedAt  DateTime  @default(now())
+  processedAt DateTime?
+  updatedAt   DateTime  @updatedAt
+
+  @@index([status, lockedUntil])
 }
 
 // ───────────────────────── Stratégie, marché, offre ─────────────────────────

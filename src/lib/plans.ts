@@ -121,6 +121,8 @@ export const RENEWAL_GRACE_MS = 3 * DAY;
  *  - active : accès ; si cancelAtPeriodEnd, accès jusqu'à currentPeriodEnd exactement ; sinon accès tant que la période payée n'est pas échue depuis plus de RENEWAL_GRACE_MS
  *    (délai de confirmation du renouvellement : au-delà, seule une réconciliation avec Stripe peut rétablir l'accès — jamais d'accès illimité sur un statut local ancien)
  *  - past_due : accès conservé (délai de grâce de 7 jours après la fin de période)
+ *  - unpaid : accès SUSPENDU immédiatement (tous les essais de prélèvement ont échoué, ou abonnement en pause faute de moyen de paiement) ; l'abonnement reste géré
+ *    (portail de paiement, résiliation) pour que le client puisse régulariser ; il reprend à la confirmation du paiement par Stripe
  *  - canceled / expired / incomplete : accès bloqué
  */
 export function entitlement(sub: SubscriptionLike | null, now = new Date()): Entitlement {
@@ -149,6 +151,7 @@ export function entitlement(sub: SubscriptionLike | null, now = new Date()): Ent
     const grace = sub.currentPeriodEnd ? sub.currentPeriodEnd.getTime() + 7 * DAY : now.getTime() + DAY;
     return grace > now.getTime() ? { active: true, state: "past_due", plan, daysLeft: null, reason: "Paiement en échec : mettez à jour votre moyen de paiement." } : { active: false, state: "past_due", plan, daysLeft: 0, reason: "Paiement en échec : accès suspendu." };
   }
+  if (status === "unpaid") return { active: false, state: "past_due", plan, daysLeft: 0, reason: "Paiement impayé : tous les essais de prélèvement ont échoué et l'accès est suspendu. Régularisez votre moyen de paiement (Moyen de paiement et factures) ou résiliez." };
   if (status === "canceled" || status === "expired") return { active: false, state: "canceled", plan, daysLeft: 0, reason: "Abonnement terminé. Réactivez un plan pour continuer." };
   return { active: false, state: "incomplete", plan, daysLeft: null, reason: "Abonnement incomplet." };
 }

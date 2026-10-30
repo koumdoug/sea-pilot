@@ -48,7 +48,7 @@ export const FOLLOWUP_ACTION_LABEL: Record<string, string> = { email: "E-mail", 
 
 export const PLAN_IDS = ["starter", "growth", "pro"] as const;
 export type PlanId = (typeof PLAN_IDS)[number];
-export const SUBSCRIPTION_STATUSES = ["trialing", "active", "past_due", "canceled", "expired", "incomplete"] as const;
+export const SUBSCRIPTION_STATUSES = ["trialing", "active", "past_due", "unpaid", "canceled", "expired", "incomplete"] as const;
 export type SubscriptionStatus = (typeof SUBSCRIPTION_STATUSES)[number];
 
 export const INTEGRATION_PROVIDERS = ["google_analytics", "meta_ads", "google_ads", "tiktok_ads", "email"] as const;

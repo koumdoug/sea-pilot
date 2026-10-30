@@ -15,7 +15,7 @@ export const stripeConfigured = () => !!env.stripeSecret;
 export const planPriceId = (plan: string) => env.stripePriceId(plan);
 
 /** Événements Stripe à déclarer sur le point de terminaison /api/stripe/webhook (les droits payants ne sont accordés que par eux). */
-export const STRIPE_WEBHOOK_EVENTS = ["checkout.session.completed", "customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted", "checkout.session.expired", "invoice.paid", "invoice.payment_failed"] as const;
+export const STRIPE_WEBHOOK_EVENTS = ["checkout.session.completed", "customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted", "customer.subscription.paused", "customer.subscription.resumed", "checkout.session.expired", "invoice.paid", "invoice.payment_failed"] as const;
 
 export type StripeSetup = {
   /** Variables serveur attendues et leur état (noms seulement : aucune valeur n'est jamais lue ici). */
@@ -168,7 +168,7 @@ export async function createCheckoutSession(p: { workspaceId: string; plan: stri
   const sub = await db.subscription.findUnique({ where: { workspaceId: p.workspaceId } });
   if (!sub) throw new BillingError("Aucun abonnement.");
   // Serveur : le masquage du bouton ne suffit pas. Un abonnement vivant se modifie par « changement de forfait » ; une seconde session de paiement le doublerait.
-  if (isLiveSubscription(sub)) throw new BillingError("Un abonnement payant est déjà actif : utilisez le changement de forfait.");
+  if (isLiveSubscription(sub)) throw new BillingError(entitlement(sub).active ? "Un abonnement payant est déjà actif : utilisez le changement de forfait." : "Un abonnement existe mais son paiement n'est plus à jour : régularisez-le avec « Moyen de paiement et factures » (ou résiliez-le) avant de souscrire à nouveau.");
   // Un identifiant Stripe local ancien ne prouve pas que l'abonnement est terminé (événements perdus) : l'état réel est relu AVANT toute nouvelle souscription.
   if (sub.stripeSubscriptionId) {
     let remote: StripeSub | null;
@@ -274,7 +274,14 @@ export function planFromPriceId(priceId: string | undefined): string | null {
   return PLAN_IDS.find((p) => env.stripePriceId(p) === priceId) ?? null;
 }
 
-const STATUS_MAP: Record<string, string> = { active: "active", trialing: "active", past_due: "past_due", unpaid: "past_due", canceled: "canceled", incomplete: "incomplete", incomplete_expired: "expired", paused: "canceled" };
+/**
+ * Statut Stripe → statut local → accès (voir docs/stripe-hardening.md pour la table complète) :
+ *  active → active (accès) ; trialing → active (essai Stripe, carte enregistrée) ; past_due → past_due (accès pendant le délai de grâce de 7 jours) ;
+ *  unpaid → unpaid (accès suspendu : plus aucun prélèvement ne sera tenté) ; paused → unpaid (en pause faute de moyen de paiement : suspendu, régularisable) ;
+ *  canceled → canceled ; incomplete → incomplete (aucun droit avant confirmation) ; incomplete_expired → expired.
+ * Une annulation PROGRAMMÉE n'est pas un statut : l'abonnement reste `active` avec cancel_at_period_end et garde l'accès jusqu'à la fin de la période payée.
+ */
+const STATUS_MAP: Record<string, string> = { active: "active", trialing: "active", past_due: "past_due", unpaid: "unpaid", canceled: "canceled", incomplete: "incomplete", incomplete_expired: "expired", paused: "unpaid" };
 
 async function findSubscription(s: { customer?: string; workspaceId?: string; subscriptionId?: string }): Promise<Subscription | null> {
   if (s.workspaceId) { const x = await db.subscription.findUnique({ where: { workspaceId: s.workspaceId } }); if (x) return x; }
@@ -284,7 +291,7 @@ async function findSubscription(s: { customer?: string; workspaceId?: string; su
 }
 
 /** Statuts locaux pour lesquels un abonnement payant existe réellement (droits du plan acquis). */
-const PAID_STATUSES = ["active", "past_due"];
+const PAID_STATUSES = ["active", "past_due", "unpaid"];
 
 export type SyncOutcome = { outcome: "handled" | "ignored" | "needs_review"; note?: string; workspaceId: string };
 
@@ -400,7 +407,7 @@ export async function reconcileSubscription(workspaceId: string, gw: StripeGatew
 }
 
 /** Statuts locaux d'un abonnement lié à Stripe qui peuvent encore changer chez Stripe (réconciliés dès que la période est échue). */
-const RECONCILE_OPEN_STATUSES = ["trialing", "active", "past_due", "incomplete"];
+const RECONCILE_OPEN_STATUSES = ["trialing", "active", "past_due", "unpaid", "incomplete"];
 /** Un abonnement terminé (canceled / expired) reste vérifié une fois par jour pendant cette fenêtre, puis n'est plus lu : il peut avoir été terminé à tort. */
 export const RECONCILE_TERMINAL_WINDOW_MS = 90 * 86_400_000;
 export const RECONCILE_INTERVAL_MS = 24 * 3_600_000;
@@ -462,7 +469,7 @@ async function processStripeEvent(ev: StripeEvent, gw: StripeGateway): Promise<{
     await db.subscription.updateMany({ where: { id: sub.id, checkoutSessionId: o.id }, data: { checkoutReservationId: null, checkoutReservedUntil: null, checkoutSessionId: null } });
     return { outcome: "handled", workspaceId: sub.workspaceId };
   }
-  if (ev.type === "customer.subscription.created" || ev.type === "customer.subscription.updated" || ev.type === "customer.subscription.deleted") {
+  if (["created", "updated", "deleted", "paused", "resumed"].some((k) => ev.type === `customer.subscription.${k}`)) {
     const s = o as unknown as StripeSub;
     const sub = await findSubscription({ workspaceId: s.metadata?.workspaceId, subscriptionId: s.id, customer: idOf(s.customer) });
     if (!sub) return ignored;

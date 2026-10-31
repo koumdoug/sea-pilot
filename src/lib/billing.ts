@@ -18,8 +18,8 @@ export const planPriceId = (plan: string) => env.stripePriceId(plan);
 export const STRIPE_WEBHOOK_EVENTS = ["checkout.session.completed", "customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted", "customer.subscription.paused", "customer.subscription.resumed", "checkout.session.expired", "invoice.paid", "invoice.payment_failed"] as const;
 
 export type StripeSetup = {
-  /** Variables serveur attendues et leur état (noms seulement : aucune valeur n'est jamais lue ici). */
-  variables: { name: string; set: boolean }[];
+  /** Variables serveur attendues et leur état (noms seulement : aucune valeur n'est jamais exposée). `set` = définie ; `valid` = définie ET de format plausible. */
+  variables: { name: string; set: boolean; valid: boolean }[];
   /** Incohérences de configuration (deux forfaits sur le même prix Stripe, par exemple). */
   issues: string[];
   /** Un forfait est souscriptible seulement si la clé, SON prix ET le secret de webhook sont définis et si les prix sont distincts. */
@@ -29,19 +29,28 @@ export type StripeSetup = {
 };
 
 /** État de la configuration du paiement. Sans secret de webhook, un paiement ne serait jamais confirmé (le forfait ne changerait pas) : la souscription reste donc indisponible. */
+/** Formats attendus (contrôle de plausibilité, sans appeler Stripe) : clé secrète ou restreinte, secret de webhook, identifiant de prix. Une clé publique (pk_…) est donc refusée. */
+const FORMAT = { secret: /^(sk|rk)_(test|live)_\S+$/, webhook: /^whsec_\S+$/, price: /^price_\S+$/ };
+
 export function stripeSetup(): StripeSetup {
-  const secret = !!env.stripeSecret, hook = !!env.stripeWebhookSecret;
+  const secretRaw = env.stripeSecret ?? "", hookRaw = env.stripeWebhookSecret ?? "";
+  const secretSet = !!secretRaw, hookSet = !!hookRaw;
+  const secret = secretSet && FORMAT.secret.test(secretRaw), hook = hookSet && FORMAT.webhook.test(hookRaw);
   const prices = Object.fromEntries(PLAN_IDS.map((p) => [p, planPriceId(p) ?? ""])) as Record<PlanId, string>;
+  const priceValid = (id: PlanId) => FORMAT.price.test(prices[id]);
   const issues: string[] = [];
+  if (secretSet && !secret) issues.push("STRIPE_SECRET_KEY est définie mais son format est inattendu (une clé secrète commence par sk_ ou rk_ ; une clé publique pk_ ne convient pas).");
+  if (hookSet && !hook) issues.push("STRIPE_WEBHOOK_SECRET est définie mais son format est inattendu (un secret de webhook commence par whsec_).");
+  for (const id of PLAN_IDS) if (prices[id] && !priceValid(id)) issues.push(`STRIPE_PRICE_${id.toUpperCase()} est définie mais son format est inattendu (un identifiant de prix commence par price_).`);
   for (const id of PLAN_IDS) for (const other of PLAN_IDS) if (id < other && prices[id] && prices[id] === prices[other]) issues.push(`Les forfaits ${PLANS[id].name} et ${PLANS[other].name} utilisent le même prix Stripe (STRIPE_PRICE_${id.toUpperCase()} et STRIPE_PRICE_${other.toUpperCase()}) : le forfait ne pourrait pas être reconnu.`);
-  if (secret && !hook) issues.push("STRIPE_WEBHOOK_SECRET manque : un paiement ne serait jamais confirmé, donc le forfait ne changerait pas. La souscription reste désactivée.");
+  if (secret && !hookSet) issues.push("STRIPE_WEBHOOK_SECRET manque : un paiement ne serait jamais confirmé, donc le forfait ne changerait pas. La souscription reste désactivée.");
   const duplicated = new Set(PLAN_IDS.filter((id) => prices[id] && PLAN_IDS.some((o) => o !== id && prices[o] === prices[id])));
-  const ready = Object.fromEntries(PLAN_IDS.map((id) => [id, secret && hook && !!prices[id] && !duplicated.has(id)])) as Record<PlanId, boolean>;
+  const ready = Object.fromEntries(PLAN_IDS.map((id) => [id, secret && hook && priceValid(id) && !duplicated.has(id)])) as Record<PlanId, boolean>;
   return {
     variables: [
-      { name: "STRIPE_SECRET_KEY", set: secret },
-      ...PLAN_IDS.map((id) => ({ name: `STRIPE_PRICE_${id.toUpperCase()}`, set: !!prices[id] })),
-      { name: "STRIPE_WEBHOOK_SECRET", set: hook },
+      { name: "STRIPE_SECRET_KEY", set: secretSet, valid: secret },
+      ...PLAN_IDS.map((id) => ({ name: `STRIPE_PRICE_${id.toUpperCase()}`, set: !!prices[id], valid: priceValid(id) })),
+      { name: "STRIPE_WEBHOOK_SECRET", set: hookSet, valid: hook },
     ],
     issues, ready, anyReady: PLAN_IDS.some((id) => ready[id]),
   };

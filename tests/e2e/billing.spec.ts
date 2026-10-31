@@ -118,4 +118,25 @@ test.describe.serial("facturation — navigateur", () => {
     await page.goto("/dashboard");
     await expect(page).toHaveURL(/\/billing\?blocked=1/); // l'accès au reste de l'application est bien suspendu
   });
+  test("membre non propriétaire : message neutre « Paiement indisponible », aucun nom de variable serveur ni procédure technique", async ({ browser }) => {
+    const m = { email: `member.${stamp}@e2e.test`, password: "MotDePasse2026" };
+    const u = await db.user.create({ data: { email: m.email, name: "Membre Simple", passwordHash: await bcrypt.hash(m.password, 4) } });
+    await db.membership.create({ data: { userId: u.id, workspaceId: wsId, role: "member" } });
+    await db.subscription.update({ where: { workspaceId: wsId }, data: { plan: "starter", status: "trialing", stripeSubscriptionId: null, stripeCustomerId: null, trialEndsAt: new Date(Date.now() + 5 * 86_400_000) } });
+    const ctx = await browser.newContext({ baseURL: "http://localhost:3101", viewport: { width: 1280, height: 800 } });
+    const p = await ctx.newPage();
+    await p.goto("/login");
+    await p.getByLabel(/^Adresse e-mail/).fill(m.email);
+    await p.getByLabel(/^Mot de passe/).fill(m.password);
+    await p.getByRole("button", { name: "Se connecter" }).click();
+    await expect(p).toHaveURL(/\/dashboard/);
+    await p.goto("/billing");
+    await expect(p.getByText("Paiement indisponible", { exact: false }).first()).toBeVisible();
+    const body = await p.locator("body").innerText();
+    expect(body).not.toContain("STRIPE_SECRET_KEY");
+    expect(body).not.toContain("STRIPE_WEBHOOK_SECRET");
+    expect(body).not.toContain("/api/stripe/webhook");
+    await expect(p.getByText("Paiement : configuration requise")).toHaveCount(0);
+    await ctx.close();
+  });
 });

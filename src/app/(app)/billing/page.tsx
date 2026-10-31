@@ -62,11 +62,14 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
         {manage.note && <p className="mt-3 text-sm font-medium text-slate-700">{manage.note}</p>}
       </Card>
 
-      {!exempt && !setup.anyReady && (
+      {!exempt && !setup.anyReady && !owner && (
+        <div className="mb-5"><Alert tone="info" title="Paiement indisponible">Le paiement en ligne est temporairement indisponible. Votre forfait actuel et vos données sont conservés. Contactez le propriétaire de l'espace pour toute question de facturation.</Alert></div>
+      )}
+      {!exempt && !setup.anyReady && owner && (
         <div className="mb-5"><Alert tone="warning" title="Paiement : configuration requise">
           <p>La souscription est indisponible : le paiement en ligne n'est pas (entièrement) configuré sur ce serveur. Aucun clic ne peut activer un forfait payant et aucun paiement n'est simulé. Votre forfait actuel et vos données sont conservés{e.state === "trial" ? ", et l'essai gratuit reste utilisable" : ""}.</p>
           <p className="mt-2 font-medium">Variables serveur attendues :</p>
-          <ul className="mt-1 space-y-1">{setup.variables.map((v) => <li key={v.name} className="flex items-center gap-2"><code className="rounded bg-white/70 px-1 py-0.5 text-xs">{v.name}</code><Badge tone={v.set ? "green" : "orange"}>{v.set ? "définie" : "manquante"}</Badge></li>)}</ul>
+          <ul className="mt-1 space-y-1">{setup.variables.map((v) => <li key={v.name} className="flex items-center gap-2"><code className="rounded bg-white/70 px-1 py-0.5 text-xs">{v.name}</code><Badge tone={v.valid ? "green" : "orange"}>{v.valid ? "définie" : v.set ? "invalide" : "manquante"}</Badge></li>)}</ul>
           {setup.issues.length > 0 && <ul className="mt-2 list-disc space-y-1 pl-5">{setup.issues.map((m) => <li key={m}>{m}</li>)}</ul>}
           <p className="mt-2 font-medium">Pour activer le paiement :</p>
           <ol className="mt-1 list-decimal space-y-1 pl-5">

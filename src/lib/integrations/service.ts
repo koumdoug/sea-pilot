@@ -9,7 +9,7 @@ import { UNLIMITED, limitReached } from "../plans";
 import { workspaceUsage } from "../billing";
 import { withWorkspaceLock } from "../quota";
 import { PROVIDERS, PROVIDER_ORDER } from "./providers";
-import { IntegrationError, IntegrationLimitError, type ConnectResult, type Credentials, type DateRange } from "./types";
+import { IntegrationError, IntegrationInactiveError, IntegrationLimitError, type ConnectResult, type Credentials, type DateRange } from "./types";
 
 export type IntegrationState = "needs_config" | "disconnected" | "connected" | "error" | "expired";
 
@@ -50,14 +50,24 @@ export function readOAuthState(state: string): { workspaceId: string; userId: st
   return { workspaceId, userId, provider };
 }
 
+export const INACTIVE_CONNECTION_MESSAGE = "Abonnement inactif : aucune intégration ne peut être connectée ni reconnectée. Réactivez votre forfait dans Facturation ; vos connexions existantes sont conservées.";
+
+/** Droits effectifs de l'espace (exemption du propriétaire comprise) : même règle que les routes API, les quotas et la tâche planifiée. */
+export async function workspaceEntitlement(workspaceId: string) {
+  return entitlementForWorkspace(workspaceId, await db.subscription.findUnique({ where: { workspaceId } }));
+}
+
 export async function saveConnection(workspaceId: string, provider: string, r: ConnectResult, actorId?: string | null) {
   const data = {
     status: "connected", credentials: encryptJson(r.credentials), accountName: r.accountName ?? null, externalAccountId: r.externalAccountId ?? null,
     connectedAt: new Date(), lastError: null, expiresAt: r.credentials.expiresAt ? new Date(r.credentials.expiresAt) : null,
   };
-  // Limite du forfait appliquée ICI, point de passage commun à la connexion par clé ET au retour OAuth (callback), dans une transaction verrouillée :
-  // ni un appel direct au callback, ni deux connexions simultanées ne dépassent le nombre d'intégrations du forfait. Reconnecter une intégration existante est libre.
-  const plan = (await entitlementForWorkspace(workspaceId, await db.subscription.findUnique({ where: { workspaceId } }))).plan;
+  // Abonnement actif ET limite du forfait appliqués ICI, point de passage commun à la connexion par clé ET au retour OAuth (callback) : ni un appel direct au callback,
+  // ni deux connexions simultanées ne dépassent le nombre d'intégrations du forfait (transaction verrouillée). Reconnecter une intégration existante ne consomme pas de place
+  // mais exige, comme toute connexion, un abonnement actif. Un abonnement inactif ne supprime ni ne modifie aucune connexion existante.
+  const ent = await workspaceEntitlement(workspaceId);
+  if (!ent.active) throw new IntegrationInactiveError(INACTIVE_CONNECTION_MESSAGE);
+  const plan = ent.plan;
   const row = await withWorkspaceLock(workspaceId, async (tx) => {
     const existing = await tx.integration.findUnique({ where: { workspaceId_provider: { workspaceId, provider } } });
     if (!existing || existing.status === "disconnected") {

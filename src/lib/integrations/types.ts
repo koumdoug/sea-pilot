@@ -52,3 +52,6 @@ export class IntegrationError extends Error {
 
 /** Limite d'intégrations du forfait atteinte : la connexion n'est pas enregistrée (le fournisseur, lui, a déjà émis l'autorisation). */
 export class IntegrationLimitError extends IntegrationError {}
+
+/** Abonnement inactif (essai terminé, résilié, impayé hors délai) : aucune connexion ni reconnexion n'est enregistrée ; les connexions existantes ne sont pas touchées. */
+export class IntegrationInactiveError extends IntegrationError {}

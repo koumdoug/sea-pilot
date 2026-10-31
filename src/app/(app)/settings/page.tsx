@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { env } from "@/lib/env";
 import { requireCtx } from "@/lib/tenant";
 import { planAllowsApi } from "@/lib/plans";
+import { activeKeysOfRemovedMembers } from "@/lib/api-key-creators";
 import { COMPANY_SIZES, CURRENCIES, LANGUAGES } from "@/lib/constants";
 import { DEFAULT_THRESHOLDS, normalizeCriteria } from "@/lib/scoring";
 import { Alert, Badge, Card, LinkButton, PageHeader, Section, TableWrap, Td, Th, fmtDate } from "@/components/ui";
@@ -151,14 +152,23 @@ async function Qualification({ workspaceId, canEdit }: { workspaceId: string; ca
 
 async function ApiKeys({ workspaceId, canManage, slug, apiAllowed }: { workspaceId: string; canManage: boolean; slug: string; apiAllowed: boolean }) {
   const keys = await db.apiKey.findMany({ where: { workspaceId }, orderBy: { createdAt: "desc" } });
+  // Clés actives créées par quelqu'un qui n'est plus membre : visibles des seuls gestionnaires, jamais révoquées automatiquement.
+  const orphans = canManage ? await activeKeysOfRemovedMembers(workspaceId) : [];
+  const orphanIds = new Set(orphans.map((k) => k.id));
   return (
     <div className="space-y-5">
+      {orphans.length > 0 && (
+        <Alert tone="warning" title="Clés créées par un ancien membre">
+          {orphans.length === 1 ? "Une clé active a été créée par une personne qui ne fait plus partie de l'espace" : `${orphans.length} clés actives ont été créées par des personnes qui ne font plus partie de l'espace`} ({orphans.map((k) => `${k.name} · ${k.prefix}…`).join(", ")}).
+          Les clés appartiennent à l'espace : elles continuent de fonctionner et aucune intégration n'est interrompue. Si cette personne a pu en copier la valeur, révoquez-les ci-dessous et remplacez-les.
+        </Alert>
+      )}
       <Section title="Clés API" description="Pour envoyer des leads depuis un autre outil (serveur à serveur). Ne placez jamais une clé dans un site public.">
         {!apiAllowed ? <Alert tone="info">L'accès API est réservé au forfait Pro. {keys.some((k) => !k.revokedAt) ? "Les clés existantes sont inactives : leurs appels sont refusés tant que le forfait n'est pas Pro. " : ""}<a className="underline" href="/billing">Voir les forfaits</a></Alert>
           : canManage ? <ApiKeyCreator action={createApiKeyAction} /> : <Alert tone="info">Seuls les administrateurs gèrent les clés API.</Alert>}
         <div className="mt-4">{keys.length === 0 ? <p className="text-sm text-slate-500">Aucune clé.</p> : (
           <TableWrap caption="Clés API"><thead><tr><Th>Nom</Th><Th>Préfixe</Th><Th>Dernier usage</Th><Th>État</Th><Th><span className="sr-only">Actions</span></Th></tr></thead>
-            <tbody>{keys.map((k) => <tr key={k.id}><Td>{k.name}</Td><Td><code>{k.prefix}…</code></Td><Td>{fmtDate(k.lastUsedAt, true)}</Td><Td>{k.revokedAt ? <Badge tone="gray">Révoquée</Badge> : <Badge tone="green">Active</Badge>}</Td><Td>{canManage && !k.revokedAt && <InlineAction action={revokeApiKeyAction} variant="danger" hidden={{ id: k.id }} confirm="Révoquer cette clé ? Les appels qui l'utilisent échoueront.">Révoquer</InlineAction>}</Td></tr>)}</tbody></TableWrap>
+            <tbody>{keys.map((k) => <tr key={k.id}><Td>{k.name}{orphanIds.has(k.id) && <> <Badge tone="orange">Créée par un ancien membre</Badge></>}</Td><Td><code>{k.prefix}…</code></Td><Td>{fmtDate(k.lastUsedAt, true)}</Td><Td>{k.revokedAt ? <Badge tone="gray">Révoquée</Badge> : <Badge tone="green">Active</Badge>}</Td><Td>{canManage && !k.revokedAt && <InlineAction action={revokeApiKeyAction} variant="danger" hidden={{ id: k.id }} confirm="Révoquer cette clé ? Les appels qui l'utilisent échoueront.">Révoquer</InlineAction>}</Td></tr>)}</tbody></TableWrap>
         )}</div>
       </Section>
       <Card><h2 className="text-base font-semibold">Utilisation</h2>

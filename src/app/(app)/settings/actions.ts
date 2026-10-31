@@ -9,9 +9,9 @@ import { destroySession, hashPassword, passwordProblem, verifyPassword } from "@
 import { run, parse, formObject, optNum, optStr, UserError, type ActionState } from "@/lib/action";
 import { COMPANY_SIZES, CURRENCIES, LANGUAGES, ROLES } from "@/lib/constants";
 import { randomToken, sha256 } from "@/lib/crypto";
-import { limitReached, planAllowsApi } from "@/lib/plans";
+import { planAllowsApi } from "@/lib/plans";
 import { QuotaError, createWithinLimit } from "@/lib/quota";
-import { workspaceUsage } from "@/lib/billing";
+import { activeKeysCreatedBy } from "@/lib/api-key-creators";
 import { normalizeCriteria } from "@/lib/scoring";
 import { rateLimit } from "@/lib/rate-limit";
 
@@ -63,12 +63,17 @@ export async function updateWorkspaceAction(_: ActionState, fd: FormData): Promi
 export async function addMemberAction(_: ActionState, fd: FormData): Promise<ActionState> {
   return run({ action: "manage_members" }, async (ctx) => {
     const d = parse(z.object({ email: z.string().trim().toLowerCase().email("E-mail invalide"), role: z.enum(["admin", "member", "viewer"]) }), formObject(fd));
-    const usage = await workspaceUsage(ctx.workspaceId);
-    if (limitReached(ctx.ent.plan, "members", usage.members)) throw new UserError("Limite d'utilisateurs atteinte pour votre plan.");
     const user = await db.user.findFirst({ where: { email: d.email, deletedAt: null } });
     if (!user) throw new UserError("Aucun compte SEA Pilot avec cette adresse. Demandez à cette personne de créer un compte (page d'inscription) puis ajoutez-la ici.");
     if (await db.membership.findUnique({ where: { userId_workspaceId: { userId: user.id, workspaceId: ctx.workspaceId } } })) throw new UserError("Cette personne fait déjà partie de l'espace.");
-    await db.membership.create({ data: { userId: user.id, workspaceId: ctx.workspaceId, role: d.role } });
+    // Comptage et création dans la même transaction verrouillée : deux ajouts simultanés ne dépassent pas la limite d'utilisateurs du forfait.
+    try {
+      await createWithinLimit({ workspaceId: ctx.workspaceId, plan: ctx.ent.plan, key: "members", message: "Limite d'utilisateurs atteinte pour votre plan.", create: (tx) => tx.membership.create({ data: { userId: user.id, workspaceId: ctx.workspaceId, role: d.role } }) });
+    } catch (e) {
+      if (e instanceof QuotaError) throw new UserError(e.message);
+      if ((e as { code?: string })?.code === "P2002") throw new UserError("Cette personne fait déjà partie de l'espace."); // ajout simultané du même compte : l'unicité de la base tranche
+      throw e;
+    }
     await audit({ workspaceId: ctx.workspaceId, userId: ctx.user.id, action: "member.added", entity: "User", entityId: user.id, meta: { role: d.role } });
     revalidatePath("/settings");
     return { ok: true, message: `${user.name} a été ajouté(e) avec le rôle « ${d.role} ».` };
@@ -95,9 +100,13 @@ export async function removeMemberAction(_: ActionState, fd: FormData): Promise<
     if (!m) throw new UserError("Membre introuvable.");
     if (m.role === "owner") throw new UserError("Le propriétaire ne peut pas être retiré.");
     if (ctx.role !== "owner" && m.role === "admin") throw new UserError("Seul le propriétaire retire un administrateur.");
+    // Politique des clés : elles appartiennent à l'espace. Retirer un membre ne les révoque PAS (aucune intégration interrompue) ; on les journalise et on le dit.
+    const keptKeys = await activeKeysCreatedBy(ctx.workspaceId, userId);
     await db.membership.delete({ where: { id: m.id } });
-    await audit({ workspaceId: ctx.workspaceId, userId: ctx.user.id, action: "member.removed", entity: "User", entityId: userId });
+    await audit({ workspaceId: ctx.workspaceId, userId: ctx.user.id, action: "member.removed", entity: "User", entityId: userId, meta: { apiKeysKept: keptKeys.length } });
+    if (keptKeys.length) await audit({ workspaceId: ctx.workspaceId, userId: ctx.user.id, action: "apikey.creator_removed", entity: "User", entityId: userId, meta: { count: keptKeys.length, keyIds: keptKeys.map((k) => k.id) } }); // identifiants seulement : aucun caractère du secret (le préfixe en contient une partie)
     revalidatePath("/settings");
+    return keptKeys.length ? { ok: true, message: `${keptKeys.length} clé(s) API créée(s) par ce membre restent actives (elles appartiennent à l'espace) : vérifiez-les dans Clés API et révoquez-les si besoin.` } : { ok: true };
   });
 }
 

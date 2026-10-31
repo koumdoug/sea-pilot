@@ -14,6 +14,8 @@ export async function GET(_req: Request, { params }: { params: Promise<{ provide
   if (!(await getSessionUser())) return Response.redirect(`${env.appUrl}/login?expired=1`, 302);
   const ctx = await getCtx();
   if (!ctx || !ctx.can("manage_integrations")) return back("error=forbidden");
+  // Abonnement inactif : pas d'autorisation demandée au fournisseur pour rien (ctx.ent porte déjà l'exemption du propriétaire).
+  if (!ctx.ent.active) return back("error=inactive");
   if (!p.isConfigured()) return back("error=needs_config");
   return Response.redirect(p.authUrl(makeOAuthState(ctx.workspaceId, ctx.user.id, provider), callbackUrl(provider)), 302);
 }

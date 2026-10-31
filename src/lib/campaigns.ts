@@ -4,6 +4,7 @@ import { audit } from "./audit";
 import { CAMPAIGN_TRANSITIONS, type CampaignStatus, CAMPAIGN_STATUSES } from "./constants";
 import { limitReached } from "./plans";
 import { entitlementForWorkspace } from "./free-access";
+import { withWorkspaceLock } from "./quota";
 
 export class CampaignError extends Error {}
 
@@ -35,12 +36,18 @@ export async function transitionCampaign(p: { workspaceId: string; campaignId: s
     const missing = launchBlockers(c, lp?.status === "published", p.to);
     if (missing.length) throw new CampaignError(`Campagne incomplète : ${missing.join(", ")}.`);
   }
+  let u: Campaign;
   if (p.to === "active") {
+    // Forfait résolu AVANT la transaction (SQLite n'a qu'une connexion : une lecture hors transaction y resterait bloquée) ; comptage des campagnes actives
+    // et passage au statut actif dans la MÊME transaction verrouillée par espace (quota.ts) : deux activations simultanées ne dépassent pas le plafond.
     const sub = await db.subscription.findUnique({ where: { workspaceId: p.workspaceId } });
-    const used = await db.campaign.count({ where: { workspaceId: p.workspaceId, status: "active", id: { not: c.id } } });
-    if (limitReached((await entitlementForWorkspace(p.workspaceId, sub)).plan, "activeCampaigns", used)) throw new CampaignError("Limite de campagnes actives atteinte pour votre plan.");
-  }
-  const u = await db.campaign.update({ where: { id: c.id }, data: { status: p.to } });
+    const plan = (await entitlementForWorkspace(p.workspaceId, sub)).plan;
+    u = await withWorkspaceLock(p.workspaceId, async (tx) => {
+      const used = await tx.campaign.count({ where: { workspaceId: p.workspaceId, status: "active", id: { not: c.id } } });
+      if (limitReached(plan, "activeCampaigns", used)) throw new CampaignError("Limite de campagnes actives atteinte pour votre plan.");
+      return tx.campaign.update({ where: { id: c.id }, data: { status: "active" } });
+    });
+  } else u = await db.campaign.update({ where: { id: c.id }, data: { status: p.to } });
   await audit({ workspaceId: p.workspaceId, userId: p.actorId, action: "campaign.status_changed", entity: "Campaign", entityId: c.id, meta: { from: c.status, to: p.to } });
   return u;
 }

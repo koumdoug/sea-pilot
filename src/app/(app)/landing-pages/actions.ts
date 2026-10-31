@@ -9,8 +9,8 @@ import { audit } from "@/lib/audit";
 import { run, parse, formObject, optStr, UserError, type ActionState } from "@/lib/action";
 import { DEFAULT_CONSENT, DEFAULT_FORM_FIELDS, defaultSections, formFieldsSchema, safeUrl, sectionsSchema } from "@/lib/landing";
 import { slugify } from "@/lib/workspaces";
-import { limitReached } from "@/lib/plans";
-import { workspaceUsage } from "@/lib/billing";
+import { createWithinLimit } from "@/lib/quota";
+import { PAGE_QUOTA_MESSAGE, createPageWithForms, pageWriteError } from "@/lib/landing-quota";
 
 async function uniqueSlug(workspaceId: string, base: string, excludeId?: string) {
   let slug = slugify(base);
@@ -21,24 +21,20 @@ async function uniqueSlug(workspaceId: string, base: string, excludeId?: string)
   }
 }
 
-async function assertPageQuota(ctx: { workspaceId: string; ent: { plan: Parameters<typeof limitReached>[0] } }) {
-  const usage = await workspaceUsage(ctx.workspaceId);
-  if (limitReached(ctx.ent.plan, "landingPages", usage.landingPages)) throw new UserError("Limite de landing pages atteinte pour votre plan.");
-}
-
 export async function createPageAction(_: ActionState, fd: FormData): Promise<ActionState> {
   let id: string | undefined;
   const r = await run({ action: "write" }, async (ctx) => {
     const d = parse(z.object({ name: z.string().trim().min(2, "Nom requis").max(120), offerId: optStr(60) }), formObject(fd));
-    await assertPageQuota(ctx);
     const offer = d.offerId ? await db.offer.findFirst({ where: { id: d.offerId, workspaceId: ctx.workspaceId } }) : null;
     if (d.offerId && !offer) throw new UserError("Offre introuvable.");
     const adv = Array.isArray(offer?.advantages) ? (offer!.advantages as string[]) : [];
     const sections = defaultSections({ name: offer?.name ?? d.name, headline: offer?.name ?? d.name, benefits: adv });
-    const page = await db.landingPage.create({
-      data: { workspaceId: ctx.workspaceId, name: d.name, slug: await uniqueSlug(ctx.workspaceId, d.name), sections: sections as unknown as Prisma.InputJsonValue, offerId: offer?.id, seoTitle: d.name.slice(0, 60), seoDescription: offer?.description?.slice(0, 155) ?? undefined },
+    // Plafond compté et page + formulaire créés dans une seule transaction verrouillée (aucune page orpheline).
+    const page = await createPageWithForms({
+      workspaceId: ctx.workspaceId, plan: ctx.ent.plan,
+      page: { workspaceId: ctx.workspaceId, name: d.name, slug: await uniqueSlug(ctx.workspaceId, d.name), sections: sections as unknown as Prisma.InputJsonValue, offerId: offer?.id, seoTitle: d.name.slice(0, 60), seoDescription: offer?.description?.slice(0, 155) ?? undefined },
+      forms: [{ name: "Formulaire principal", fields: DEFAULT_FORM_FIELDS as unknown as Prisma.InputJsonValue, consentText: DEFAULT_CONSENT }],
     });
-    await db.form.create({ data: { workspaceId: ctx.workspaceId, landingPageId: page.id, name: "Formulaire principal", fields: DEFAULT_FORM_FIELDS as unknown as Prisma.InputJsonValue, consentText: DEFAULT_CONSENT } });
     await audit({ workspaceId: ctx.workspaceId, userId: ctx.user.id, action: "landing.created", entity: "LandingPage", entityId: page.id });
     id = page.id;
   });
@@ -102,9 +98,12 @@ export async function publishPageAction(_: ActionState, fd: FormData): Promise<A
       if (!page.seoDescription?.trim()) problems.push("une meta description");
       if (!page.forms.length) problems.push("un formulaire actif");
       if (problems.length) throw new UserError(`Publication impossible : il manque ${problems.join(", ")}.`);
-      if (page.status === "archived") await assertPageQuota(ctx);
     }
-    await db.landingPage.update({ where: { id }, data: { status: to, publishedAt: to === "published" ? page.publishedAt ?? new Date() : page.publishedAt } });
+    const change = (client: Pick<typeof db, "landingPage">) => client.landingPage.update({ where: { id }, data: { status: to, publishedAt: to === "published" ? page.publishedAt ?? new Date() : page.publishedAt } });
+    // Sortir une page de l'archive la recompte dans le forfait (publication OU retour en brouillon) : plafond compté et statut écrit dans la même transaction verrouillée.
+    if (page.status === "archived" && to !== "archived") {
+      try { await createWithinLimit({ workspaceId: ctx.workspaceId, plan: ctx.ent.plan, key: "landingPages", message: PAGE_QUOTA_MESSAGE, create: (tx) => change(tx) }); } catch (e) { pageWriteError(e); }
+    } else await change(db);
     await audit({ workspaceId: ctx.workspaceId, userId: ctx.user.id, action: `landing.${to}`, entity: "LandingPage", entityId: id });
     revalidatePath("/landing-pages"); revalidatePath(`/landing-pages/${id}`);
     return { ok: true, message: to === "published" ? "Page publiée." : to === "draft" ? "Page dépubliée (brouillon)." : "Page archivée." };
@@ -117,11 +116,11 @@ export async function duplicatePageAction(_: ActionState, fd: FormData): Promise
     const { id: src } = parse(z.object({ id: z.string() }), formObject(fd));
     const p = await db.landingPage.findFirst({ where: { id: src, workspaceId: ctx.workspaceId }, include: { forms: true } });
     if (!p) throw new UserError("Page introuvable.");
-    await assertPageQuota(ctx);
-    const copy = await db.landingPage.create({
-      data: { workspaceId: ctx.workspaceId, name: `${p.name} (copie)`, slug: await uniqueSlug(ctx.workspaceId, `${p.slug}-copie`), status: "draft", sections: p.sections as Prisma.InputJsonValue, theme: (p.theme ?? undefined) as Prisma.InputJsonValue | undefined, seoTitle: p.seoTitle, seoDescription: p.seoDescription, ogImage: p.ogImage, campaignId: p.campaignId, offerId: p.offerId },
+    const copy = await createPageWithForms({
+      workspaceId: ctx.workspaceId, plan: ctx.ent.plan,
+      page: { workspaceId: ctx.workspaceId, name: `${p.name} (copie)`, slug: await uniqueSlug(ctx.workspaceId, `${p.slug}-copie`), status: "draft", sections: p.sections as Prisma.InputJsonValue, theme: (p.theme ?? undefined) as Prisma.InputJsonValue | undefined, seoTitle: p.seoTitle, seoDescription: p.seoDescription, ogImage: p.ogImage, campaignId: p.campaignId, offerId: p.offerId },
+      forms: p.forms.map((f) => ({ name: f.name, fields: f.fields as Prisma.InputJsonValue, consentText: f.consentText, successMessage: f.successMessage, redirectUrl: f.redirectUrl, active: f.active })),
     });
-    for (const f of p.forms) await db.form.create({ data: { workspaceId: ctx.workspaceId, landingPageId: copy.id, name: f.name, fields: f.fields as Prisma.InputJsonValue, consentText: f.consentText, successMessage: f.successMessage, redirectUrl: f.redirectUrl, active: f.active } });
     id = copy.id;
   });
   if (r.ok && id) redirect(`/landing-pages/${id}`);

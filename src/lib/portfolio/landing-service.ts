@@ -5,6 +5,8 @@ import { UserError } from "../action";
 import { FIELD_LIBRARY, sectionsSchema, sid } from "../landing";
 import { limitReached, type Plan } from "../plans";
 import { workspaceUsage } from "../billing";
+import { withWorkspaceLock } from "../quota";
+import { pageWriteError } from "../landing-quota";
 import { slugify } from "../workspaces";
 import { buildProductLanding, type TemplateProduct } from "./landing-template";
 
@@ -20,8 +22,8 @@ async function uniqueSlug(workspaceId: string, base: string) {
 }
 
 /** Landing page existante (non archivée) rattachée au produit, directement ou par son offre. */
-export const findProductPage = (workspaceId: string, productId: string) =>
-  db.landingPage.findFirst({ where: { workspaceId, status: { not: "archived" }, OR: [{ productId }, { offer: { productId } }] }, orderBy: { createdAt: "asc" }, select: { id: true, name: true, status: true } });
+export const findProductPage = (workspaceId: string, productId: string, client: Pick<Prisma.TransactionClient, "landingPage"> = db) =>
+  client.landingPage.findFirst({ where: { workspaceId, status: { not: "archived" }, OR: [{ productId }, { offer: { productId } }] }, orderBy: { createdAt: "asc" }, select: { id: true, name: true, status: true } });
 
 /**
  * Crée, à la demande de l'utilisateur, l'offre (brouillon, tarif vide s'il n'est pas confirmé) et la landing page BROUILLON d'un produit du catalogue.
@@ -32,7 +34,6 @@ export async function createProductLanding(p: { workspaceId: string; productId: 
   if (!product) throw new UserError("Produit introuvable.");
   const existing = await findProductPage(p.workspaceId, product.id);
   if (existing) return { created: false, pageId: existing.id, offerId: null, gaps: [] };
-  if (limitReached(p.plan, "landingPages", (await workspaceUsage(p.workspaceId)).landingPages)) throw new UserError("Limite de landing pages atteinte pour votre plan.");
 
   const draft = buildProductLanding(product as unknown as TemplateProduct, sid);
   const parsed = sectionsSchema.safeParse(draft.sections);
@@ -42,7 +43,11 @@ export async function createProductLanding(p: { workspaceId: string; productId: 
   const verified = arr<Feature>(product.features).filter((f) => f.verified).map((f) => f.text);
   const priced = arr<{ verified: boolean; amount: number | null; currency: string | null; interval: string | null }>((product.pricing as { plans?: unknown } | null)?.plans).find((x) => x.verified && x.amount != null && x.amount > 0 && !!x.currency && x.interval === "month");
   const slug = await uniqueSlug(p.workspaceId, product.slug); // hors transaction : SQLite n'a qu'une connexion, une requête externe bloquerait la transaction
-  const result = await db.$transaction(async (tx) => {
+  // Verrou par espace (quota.ts) : l'existence d'une page du produit et le plafond sont relus DANS la transaction qui écrit (deux demandes simultanées : une seule page, jamais au-delà du plafond).
+  const result: { already: string } | { pageId: string; offerId: string } = await withWorkspaceLock(p.workspaceId, async (tx) => {
+    const already = await findProductPage(p.workspaceId, product.id, tx);
+    if (already) return { already: already.id };
+    if (limitReached(p.plan, "landingPages", (await workspaceUsage(p.workspaceId, tx)).landingPages)) throw new UserError("Limite de landing pages atteinte pour votre plan.");
     const offer = (await tx.offer.findFirst({ where: { workspaceId: p.workspaceId, productId: product.id, status: { not: "archived" } }, orderBy: { createdAt: "asc" } }))
       ?? await tx.offer.create({ data: {
         workspaceId: p.workspaceId, productId: product.id, name: `Offre ${product.name}`, status: "draft", description: product.description, problem: arr<string>(product.problemsSolved).join(" ; ") || null,
@@ -54,7 +59,8 @@ export async function createProductLanding(p: { workspaceId: string; productId: 
     } });
     await tx.form.create({ data: { workspaceId: p.workspaceId, landingPageId: page.id, name: "Formulaire de contact", fields: fields as unknown as Prisma.InputJsonValue, consentText: draft.consentText } });
     return { pageId: page.id, offerId: offer.id };
-  });
+  }).catch(pageWriteError);
+  if ("already" in result) return { created: false, pageId: result.already, offerId: null, gaps: [] };
   await audit({ workspaceId: p.workspaceId, userId: p.userId, action: "product.landing_created", entity: "LandingPage", entityId: result.pageId, meta: { productId: product.id } });
   return { created: true, ...result, gaps: draft.gaps };
 }

@@ -2,8 +2,8 @@ import { getSessionUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { can } from "@/lib/permissions";
 import { PROVIDERS } from "@/lib/integrations/providers";
-import { callbackUrl, readOAuthState, saveConnection } from "@/lib/integrations/service";
-import { IntegrationLimitError } from "@/lib/integrations/types";
+import { callbackUrl, readOAuthState, saveConnection, workspaceEntitlement } from "@/lib/integrations/service";
+import { IntegrationInactiveError, IntegrationLimitError } from "@/lib/integrations/types";
 import { env } from "@/lib/env";
 import { log, errMsg } from "@/lib/logger";
 
@@ -26,12 +26,15 @@ export async function GET(req: Request, { params }: { params: Promise<{ provider
 
   const code = url.searchParams.get("code");
   if (!code) return back("error=nocode");
+  // Abonnement inactif : refus AVANT l'échange du code avec le fournisseur (aucun jeton émis pour rien) ; saveConnection applique la même règle.
+  if (!(await workspaceEntitlement(state.workspaceId)).active) return back("error=inactive");
   try {
     const r = await p.exchangeCode(code, callbackUrl(provider));
     await saveConnection(state.workspaceId, provider, r, user.id);
     return back(`connected=${provider}`);
   } catch (e) {
     if (e instanceof IntegrationLimitError) return back("error=limit");
+    if (e instanceof IntegrationInactiveError) return back("error=inactive");
     log.error("integration.callback_failed", { provider, error: errMsg(e) });
     return back("error=exchange");
   }

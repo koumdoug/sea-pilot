@@ -13,9 +13,8 @@ import { briefOf } from "@/lib/ai/brief";
 import { defaultSections, sid } from "@/lib/landing";
 import { slugify } from "@/lib/workspaces";
 import { DEFAULT_CONSENT, DEFAULT_FORM_FIELDS } from "@/lib/landing";
-import { limitReached } from "@/lib/plans";
+import { createPageWithForms } from "@/lib/landing-quota";
 import { CURRENCIES } from "@/lib/constants";
-import { workspaceUsage } from "@/lib/billing";
 import { marginInputError } from "@/lib/margin";
 
 const offerSchemaIn = z.object({
@@ -133,8 +132,6 @@ export async function createPageFromVariantAction(_: ActionState, fd: FormData):
     if (!offer) throw new UserError("Offre introuvable.");
     const v = ((Array.isArray(offer.variants) ? offer.variants : []) as { id: string; headline: string; subheadline: string; benefits: string[]; objections: { objection: string; answer: string }[]; valueProposition: string; cta: string }[]).find((x) => x.id === variantId);
     if (!v) throw new UserError("Variante introuvable.");
-    const usage = await workspaceUsage(ctx.workspaceId);
-    if (limitReached(ctx.ent.plan, "landingPages", usage.landingPages)) throw new UserError("Limite de landing pages atteinte pour votre plan.");
     const sections = defaultSections({ name: offer.name, headline: v.headline, subheadline: v.subheadline, benefits: v.benefits });
     for (const s of sections) {
       if (s.type === "solution") s.body = v.valueProposition;
@@ -143,8 +140,12 @@ export async function createPageFromVariantAction(_: ActionState, fd: FormData):
     }
     let slug = slugify(`${offer.name}-${variantId.slice(2, 6)}`);
     for (let i = 2; await db.landingPage.findUnique({ where: { workspaceId_slug: { workspaceId: ctx.workspaceId, slug } } }); i++) slug = `${slugify(offer.name)}-${i}`;
-    const page = await db.landingPage.create({ data: { workspaceId: ctx.workspaceId, name: `${offer.name} — ${v.headline.slice(0, 40)}`, slug, sections: sections as unknown as Prisma.InputJsonValue, offerId: offer.id, seoTitle: v.headline.slice(0, 60), seoDescription: v.subheadline.slice(0, 155) } });
-    await db.form.create({ data: { workspaceId: ctx.workspaceId, landingPageId: page.id, name: "Formulaire principal", fields: DEFAULT_FORM_FIELDS as unknown as Prisma.InputJsonValue, consentText: DEFAULT_CONSENT } });
+    // Plafond compté et page + formulaire créés dans une seule transaction verrouillée (aucune page orpheline).
+    const page = await createPageWithForms({
+      workspaceId: ctx.workspaceId, plan: ctx.ent.plan,
+      page: { workspaceId: ctx.workspaceId, name: `${offer.name} — ${v.headline.slice(0, 40)}`, slug, sections: sections as unknown as Prisma.InputJsonValue, offerId: offer.id, seoTitle: v.headline.slice(0, 60), seoDescription: v.subheadline.slice(0, 155) },
+      forms: [{ name: "Formulaire principal", fields: DEFAULT_FORM_FIELDS as unknown as Prisma.InputJsonValue, consentText: DEFAULT_CONSENT }],
+    });
     pageId = page.id;
   });
   if (r.ok && pageId) redirect(`/landing-pages/${pageId}`);

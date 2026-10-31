@@ -16,7 +16,7 @@ const AD = ["meta_ads", "google_ads", "tiktok_ads"] as const;
 /** Espace avec des intégrations publicitaires connectées (créées dans l'ordre : la plus ancienne en premier). */
 async function workspaceWith(plan: "starter" | "growth" | "pro", providers: readonly string[], over: Record<string, unknown> = {}) {
   const w = await makeWorkspace();
-  await db.subscription.update({ where: { workspaceId: w.workspaceId }, data: { plan: "pro", ...over } }); // Pro le temps de connecter : la limite se teste ensuite sur le forfait cible
+  await db.subscription.update({ where: { workspaceId: w.workspaceId }, data: { plan: "pro" } }); // Pro et abonnement actif (essai) le temps de connecter : connecter exige un abonnement actif ; le forfait cible et l'état inactif testés s'appliquent ensuite aux connexions déjà enregistrées
   for (const p of providers) { await saveConnection(w.workspaceId, p, { credentials: { accessToken: "tok" }, config: { adAccountId: `act_${p}`, customerId: `c_${p}`, advertiserId: `a_${p}` } }); await new Promise((r) => setTimeout(r, 5)); }
   await db.subscription.update({ where: { workspaceId: w.workspaceId }, data: { plan, ...over } });
   return w;

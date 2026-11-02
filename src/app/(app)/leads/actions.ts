@@ -7,7 +7,7 @@ import { db } from "@/lib/db";
 import { audit } from "@/lib/audit";
 import { run, parse, formObject, optNum, optStr, UserError, type ActionState } from "@/lib/action";
 import { LEAD_STATUSES } from "@/lib/constants";
-import { LeadError, changeLeadStatus, createLead, eraseLead, qualifyLeadService, unsubscribeLead } from "@/lib/leads";
+import { LeadError, changeLeadStatus, createLead, eraseLead, qualifyLeadService, unsubscribeLead, updateLeadDetails } from "@/lib/leads";
 import { enrollLead, cancelPendingFollowUps } from "@/lib/followups";
 
 const lead = (e: unknown): never => { if (e instanceof LeadError) throw new UserError(e.message); throw e; };
@@ -33,11 +33,15 @@ export async function createLeadAction(_: ActionState, fd: FormData): Promise<Ac
 
 export async function updateLeadAction(_: ActionState, fd: FormData): Promise<ActionState> {
   return run({ action: "write" }, async (ctx) => {
-    const d = parse(z.object({ id: z.string(), name: z.string().trim().min(1, "Nom requis").max(120), email: z.string().trim().email("E-mail invalide").max(200).optional().or(z.literal("")), phone: optStr(40), company: optStr(160), value: optNum }), formObject(fd));
-    const u = await db.lead.updateMany({ where: { id: d.id, workspaceId: ctx.workspaceId, deletedAt: null }, data: { name: d.name, email: d.email ? d.email.toLowerCase() : null, phone: d.phone ?? null, company: d.company ?? null, value: d.value ?? null } });
-    if (!u.count) throw new UserError("Prospect introuvable.");
+    const d = parse(z.object({ id: z.string(), name: z.string().trim().min(1, "Nom requis").max(120), email: z.string().trim().email("E-mail invalide").max(200).optional().or(z.literal("")), phone: optStr(40), company: optStr(160), value: optNum, consent: z.string().optional() }), formObject(fd));
+    // point unique de modification des coordonnées : une nouvelle adresse n'hérite pas du consentement marketing de l'ancienne (voir updateLeadDetails)
+    const r = await updateLeadDetails({ workspaceId: ctx.workspaceId, leadId: d.id, name: d.name, email: d.email || null, phone: d.phone ?? null, company: d.company ?? null, value: d.value ?? null, consentForEmail: d.consent === "on", actorId: ctx.user.id }).catch(lead);
+    if (!r) throw new UserError("Prospect introuvable.");
     revalidatePath(`/leads/${d.id}`);
-    return { ok: true, message: "Fiche mise à jour." };
+    const detail = r.emailChanged
+      ? ` Adresse modifiée : le consentement marketing de l'ancienne adresse est révoqué${r.cancelledFollowUps ? ` et ${r.cancelledFollowUps} relance(s) e-mail en attente annulée(s)` : ""}. ${r.consentGranted ? "Un consentement explicite a été enregistré pour la nouvelle adresse." : "Aucun e-mail marketing ne sera envoyé à la nouvelle adresse sans consentement enregistré."}`
+      : r.consentGranted ? " Consentement marketing enregistré pour cette adresse." : "";
+    return { ok: true, message: `Fiche mise à jour.${detail}` };
   });
 }
 

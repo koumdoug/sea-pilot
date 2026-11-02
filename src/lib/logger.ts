@@ -1,6 +1,11 @@
 // Logs structurés (une ligne JSON). Les champs sensibles sont masqués avant écriture.
 const SENSITIVE = /pass|secret|token|key|authorization|cookie|credential|email|phone|ip/i;
 
+// Valeurs : une adresse ou une empreinte de la liste de suppression ne sort jamais d'un texte libre (message d'exception, erreur de base de données…).
+const EMAIL_VALUE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+const FINGERPRINT_VALUE = /\b(?:h1:[0-9a-f]{12}:[0-9a-f]{64}|erased:[0-9a-f]{64})\b/g;
+const redactText = (s: string) => s.replace(EMAIL_VALUE, "[e-mail masqué]").replace(FINGERPRINT_VALUE, "[empreinte masquée]");
+
 function scrub(v: unknown, depth = 0): unknown {
   if (depth > 4 || v == null) return v;
   if (Array.isArray(v)) return v.slice(0, 20).map((x) => scrub(x, depth + 1));
@@ -9,7 +14,7 @@ function scrub(v: unknown, depth = 0): unknown {
     for (const [k, val] of Object.entries(v as Record<string, unknown>)) out[k] = SENSITIVE.test(k) ? "[masqué]" : scrub(val, depth + 1);
     return out;
   }
-  if (typeof v === "string" && v.length > 300) return v.slice(0, 300) + "…";
+  if (typeof v === "string") { const t = redactText(v); return t.length > 300 ? t.slice(0, 300) + "…" : t; }
   return v;
 }
 

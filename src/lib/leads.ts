@@ -1,4 +1,4 @@
-import type { Lead, Prisma } from "@prisma/client";
+import { Prisma, type Lead } from "@prisma/client";
 import { db } from "./db";
 import { audit } from "./audit";
 import { TERMINAL_STATUSES, LEAD_STATUSES, type LeadStatus } from "./constants";
@@ -7,7 +7,9 @@ import { generate } from "./ai/service";
 import { getProvider } from "./ai/providers";
 import { baseSystem, qualificationAiSchema, qualificationPrompt } from "./ai/prompts";
 import { slugify } from "./workspaces";
-import { cancelPendingFollowUps, enrollLead } from "./followups";
+import { cancelPendingFollowUps, enrollLead, revokeLeadFollowUps } from "./followups";
+import { TxAbort, runTx } from "./followup-runtime";
+import { suppressionWriteKey } from "./suppression";
 import { log, errMsg } from "./logger";
 
 export type NewLeadInput = {
@@ -129,48 +131,148 @@ export async function createLead(i: NewLeadInput): Promise<{ lead: Lead; duplica
 }
 
 export class LeadError extends Error {}
+/** Le statut a changé entre sa lecture et son écriture (modification concurrente) : jamais d'écrasement. */
+export class LeadStatusConflict extends LeadError {}
 
-export async function changeLeadStatus(p: { workspaceId: string; leadId: string; status: string; actorId?: string | null; value?: number | null; lostReason?: string | null }): Promise<Lead> {
+type LeadClient = Prisma.TransactionClient | typeof db;
+export type StatusChangeResult = { lead: Lead; from: string; changed: boolean; valueCorrected: boolean; terminal: boolean };
+type StatusChangeInput = { workspaceId: string; leadId: string; status: string; actorId?: string | null; value?: number | null; lostReason?: string | null };
+
+/**
+ * Écritures d'un changement de statut sur le client fourni (la base ou une TRANSACTION) : prospect, historique, client gagné, événement.
+ * N'utilise que `c` (jamais la connexion globale : SQLite n'a qu'une connexion) ; les effets hors transaction (annulation des étapes restantes, audit)
+ * sont faits par l'appelant à partir du résultat. Rejouer le même statut ne produit aucun nouvel effet.
+ */
+export async function applyLeadStatusChange(c: LeadClient, p: StatusChangeInput): Promise<StatusChangeResult> {
   if (!(LEAD_STATUSES as readonly string[]).includes(p.status)) throw new LeadError("Statut invalide.");
   const status = p.status as LeadStatus;
-  const lead = await db.lead.findFirst({ where: { id: p.leadId, workspaceId: p.workspaceId, deletedAt: null } });
+  const lead = await c.lead.findFirst({ where: { id: p.leadId, workspaceId: p.workspaceId, deletedAt: null } });
   if (!lead) throw new LeadError("Prospect introuvable.");
   if (lead.status === status) {
     // Rejeu (retry, double clic) : aucun nouvel événement ni historique. Seule une correction de montant d'un lead gagné est appliquée.
     if (status === "won" && p.value !== undefined && p.value !== null && p.value !== lead.value) {
-      const u = await db.lead.update({ where: { id: lead.id }, data: { value: p.value } });
-      if (u.customerId) await db.customer.updateMany({ where: { id: u.customerId, workspaceId: p.workspaceId }, data: { revenue: p.value } });
-      await audit({ workspaceId: p.workspaceId, userId: p.actorId, action: "lead.value_corrected", entity: "Lead", entityId: lead.id });
-      return u;
+      const u = await c.lead.update({ where: { id: lead.id }, data: { value: p.value } });
+      if (u.customerId) await c.customer.updateMany({ where: { id: u.customerId, workspaceId: p.workspaceId }, data: { revenue: p.value } });
+      return { lead: u, from: lead.status, changed: false, valueCorrected: true, terminal: false };
     }
-    return lead;
+    return { lead, from: lead.status, changed: false, valueCorrected: false, terminal: false };
   }
 
   const now = new Date();
-  const data: Prisma.LeadUpdateInput = { status };
+  const data: Prisma.LeadUpdateManyMutationInput = { status };
   if (status === "qualified" && !lead.qualifiedAt) data.qualifiedAt = now;
   if (status === "won") { data.wonAt = now; if (p.value !== undefined && p.value !== null) data.value = p.value; data.lostAt = null; data.lostReason = null; }
   if (status === "lost") { data.lostAt = now; data.lostReason = clean(p.lostReason, 300); }
   if (status !== "won" && lead.status === "won") data.wonAt = null;
 
-  const updated = await db.lead.update({ where: { id: lead.id }, data });
-  await db.leadActivity.create({ data: { workspaceId: p.workspaceId, leadId: lead.id, type: "status_changed", actorId: p.actorId ?? null, data: { from: lead.status, to: status } } });
+  // Écriture CONDITIONNELLE au statut effectivement observé (vérification atomique) : une modification concurrente plus récente n'est jamais écrasée,
+  // l'historique (`from`) et les dates associées (wonAt, lostAt) sont toujours calculés sur l'état réellement remplacé.
+  const cas = await c.lead.updateMany({ where: { id: lead.id, workspaceId: p.workspaceId, status: lead.status, deletedAt: null }, data });
+  if (cas.count !== 1) throw new LeadStatusConflict("Le statut du prospect a été modifié entre-temps.");
+  const updated = await c.lead.findUniqueOrThrow({ where: { id: lead.id } });
+  await c.leadActivity.create({ data: { workspaceId: p.workspaceId, leadId: lead.id, type: "status_changed", actorId: p.actorId ?? null, data: { from: lead.status, to: status } } });
 
   if (status === "won") {
     // Client créé à partir du lead (une seule fois) ; le revenu est le montant de l'affaire.
     let customerId = updated.customerId;
     if (!customerId) {
-      const c = await db.customer.create({ data: { workspaceId: p.workspaceId, campaignId: updated.campaignId, name: updated.name, email: updated.email, phone: updated.phone, company: updated.company, revenue: updated.value ?? 0 } });
-      customerId = c.id;
-      await db.lead.update({ where: { id: lead.id }, data: { customerId } });
+      const cu = await c.customer.create({ data: { workspaceId: p.workspaceId, campaignId: updated.campaignId, name: updated.name, email: updated.email, phone: updated.phone, company: updated.company, revenue: updated.value ?? 0 } });
+      customerId = cu.id;
+      await c.lead.update({ where: { id: lead.id }, data: { customerId } });
     } else {
-      await db.customer.updateMany({ where: { id: customerId, workspaceId: p.workspaceId }, data: { revenue: updated.value ?? 0 } });
+      await c.customer.updateMany({ where: { id: customerId, workspaceId: p.workspaceId }, data: { revenue: updated.value ?? 0 } });
     }
-    await db.analyticsEvent.create({ data: { workspaceId: p.workspaceId, type: "customer_won", leadId: lead.id, campaignId: updated.campaignId, meta: { value: updated.value } } });
+    await c.analyticsEvent.create({ data: { workspaceId: p.workspaceId, type: "customer_won", leadId: lead.id, campaignId: updated.campaignId, meta: { value: updated.value } } });
   }
-  if ((TERMINAL_STATUSES as string[]).includes(status)) await cancelPendingFollowUps(p.workspaceId, lead.id, `Statut « ${status} » : relances arrêtées.`);
-  await audit({ workspaceId: p.workspaceId, userId: p.actorId, action: "lead.status_changed", entity: "Lead", entityId: lead.id, meta: { from: lead.status, to: status } });
-  return (await db.lead.findUnique({ where: { id: lead.id } })) ?? updated;
+  return { lead: (await c.lead.findUnique({ where: { id: lead.id } })) ?? updated, from: lead.status, changed: true, valueCorrected: false, terminal: (TERMINAL_STATUSES as string[]).includes(status) };
+}
+
+export async function changeLeadStatus(p: StatusChangeInput): Promise<Lead> {
+  // Chemin manuel : en cas de modification concurrente, la décision explicite de l'utilisateur est réappliquée sur l'état réellement observé (au plus 3 essais).
+  let r: StatusChangeResult | undefined;
+  for (let i = 0; !r; i++) {
+    try { r = await applyLeadStatusChange(db, p); }
+    catch (e) {
+      if (!(e instanceof LeadStatusConflict)) throw e;
+      if (i >= 2) throw new LeadError("Le prospect est modifié en continu : réessayez.");
+    }
+  }
+  if (r.valueCorrected) {
+    await audit({ workspaceId: p.workspaceId, userId: p.actorId, action: "lead.value_corrected", entity: "Lead", entityId: r.lead.id });
+    return r.lead;
+  }
+  if (!r.changed) return r.lead;
+  if (r.terminal) await cancelPendingFollowUps(p.workspaceId, r.lead.id, `Statut « ${p.status} » : relances arrêtées.`);
+  await audit({ workspaceId: p.workspaceId, userId: p.actorId, action: "lead.status_changed", entity: "Lead", entityId: r.lead.id, meta: { from: r.from, to: p.status } });
+  return r.lead;
+}
+
+// ───────────────────────── Coordonnées et consentement ─────────────────────────
+
+export type LeadDetailsInput = {
+  workspaceId: string; leadId: string; name: string; email: string | null; phone: string | null; company: string | null; value: number | null;
+  /** Consentement marketing EXPLICITE pour l'adresse enregistrée, attesté par l'utilisateur qui saisit la modification. */
+  consentForEmail?: boolean; actorId?: string | null;
+};
+export type LeadDetailsResult = { emailChanged: boolean; consentRevoked: boolean; consentGranted: boolean; cancelledFollowUps: number };
+
+const normEmail = (e?: string | null) => (e && e.trim() ? e.trim().toLowerCase() : null);
+const EMAIL_CHANGED_REASON = "Adresse e-mail modifiée : le consentement marketing de l'ancienne adresse ne s'applique pas à la nouvelle.";
+
+/**
+ * Point UNIQUE de modification des coordonnées d'un prospect. Règle : une nouvelle adresse (comparaison normalisée) n'hérite JAMAIS de l'autorisation marketing de l'ancienne.
+ * Dans UNE transaction (ordre FollowUp → Lead → données dérivées) : les relances e-mail en attente ou bloquées sont annulées, le consentement marketing du prospect est retiré,
+ * la révocation est tracée (ligne de consentement « granted: false » sur l'ANCIENNE adresse, source « email_changed »), puis les coordonnées sont écrites de façon CONDITIONNELLE à la
+ * version lue (deux modifications concurrentes : la seconde est relue, jamais écrasée). Un nouvel envoi marketing exige un consentement enregistré pour la nouvelle adresse
+ * (`consentForEmail`, ou un enregistrement ultérieur) ; la désinscription et la liste de suppression restent inchangées et prioritaires. Aucun message n'est envoyé.
+ * Le moteur d'envoi exige en outre une ligne de consentement accordée pour l'adresse EXACTE du prospect : une écriture directe en base ne contourne pas la règle.
+ */
+export async function updateLeadDetails(p: LeadDetailsInput): Promise<LeadDetailsResult | null> {
+  const newEmail = normEmail(p.email);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const lead = await db.lead.findFirst({ where: { id: p.leadId, workspaceId: p.workspaceId, deletedAt: null } });
+    if (!lead) return null;
+    const oldEmail = normEmail(lead.email);
+    const changed = oldEmail !== newEmail;
+    if (p.consentForEmail) {
+      if (lead.unsubscribedAt) throw new LeadError("Le prospect s'est désinscrit : aucun consentement ne peut être enregistré par cette voie.");
+      if (!newEmail) throw new LeadError("Indiquez une adresse e-mail pour enregistrer un consentement.");
+    }
+    const grant = !!p.consentForEmail && (changed || !lead.consentMarketing);
+    const now = new Date();
+    const consentText = "Consentement attesté par l'utilisateur de SEA Pilot lors de la modification de la fiche";
+    const out = await runTx<LeadDetailsResult | "conflict">(async (tx) => {
+      let cancelled = 0;
+      if (changed) {
+        cancelled = (await tx.followUp.updateMany({
+          where: { workspaceId: p.workspaceId, leadId: lead.id, action: "email", status: { in: ["pending", "blocked"] } },
+          data: { status: "cancelled", result: EMAIL_CHANGED_REASON, executedAt: now, failureKind: "email_changed", leaseToken: null, leaseUntil: null, retryAfter: null },
+        })).count;
+      }
+      const data: Prisma.LeadUpdateManyMutationInput = { name: p.name, email: newEmail, phone: p.phone, company: p.company, value: p.value };
+      if (changed) data.consentMarketing = false;
+      if (grant) { data.consentMarketing = true; data.consentAt = now; data.consentText = consentText; }
+      const u = await tx.lead.updateMany({ where: { id: lead.id, workspaceId: p.workspaceId, updatedAt: lead.updatedAt, deletedAt: null }, data });
+      if (u.count !== 1) throw new TxAbort("conflict" as const);
+      const revoked = changed && lead.consentMarketing && !!oldEmail;
+      if (revoked) {
+        await tx.consent.create({ data: { workspaceId: p.workspaceId, leadId: lead.id, email: oldEmail!, type: "marketing", granted: false, source: "email_changed" } });
+        await tx.leadActivity.create({ data: { workspaceId: p.workspaceId, leadId: lead.id, type: "consent", actorId: p.actorId ?? null, data: { action: "revoked", reason: "email_changed" } } });
+      }
+      if (grant && newEmail) {
+        await tx.consent.create({ data: { workspaceId: p.workspaceId, leadId: lead.id, email: newEmail, type: "marketing", granted: true, source: "manual_email_change", text: consentText } });
+        await tx.leadActivity.create({ data: { workspaceId: p.workspaceId, leadId: lead.id, type: "consent", actorId: p.actorId ?? null, data: { action: "granted", reason: "explicit" } } });
+      }
+      return { emailChanged: changed, consentRevoked: revoked, consentGranted: grant, cancelledFollowUps: cancelled };
+    });
+    if (out === "conflict") continue; // modification concurrente : relecture de l'état réel, la règle est réévaluée
+    if (out.emailChanged || out.consentGranted) {
+      // sans adresse ni donnée personnelle dans la trace
+      await audit({ workspaceId: p.workspaceId, userId: p.actorId, action: "lead.email_changed", entity: "Lead", entityId: lead.id, meta: { consentRevoked: out.consentRevoked, consentGranted: out.consentGranted, cancelledFollowUps: out.cancelledFollowUps } });
+    }
+    return out;
+  }
+  throw new LeadError("Le prospect est modifié en continu : réessayez.");
 }
 
 // ───────────────────────── Qualification ─────────────────────────
@@ -266,42 +368,96 @@ export async function qualifyLeadService(p: { workspaceId: string; leadId: strin
 
 // ───────────────────────── RGPD ─────────────────────────
 
-/** Désinscription : arrête les relances, enregistre la suppression et le retrait de consentement. */
+/**
+ * Désinscription : UNE transaction (ordre FollowUp → Lead → données dérivées) — révocation de toutes les relances (y compris celles en cours : leur jeton est effacé),
+ * retrait du consentement, liste de suppression, trace. Rejouable : un second appel répare une désinscription interrompue (liste de suppression, relances).
+ */
 export async function unsubscribeLead(workspaceId: string, leadId: string, source = "link") {
   const lead = await db.lead.findFirst({ where: { id: leadId, workspaceId } });
   if (!lead) return false;
-  if (lead.unsubscribedAt) return true; // déjà désinscrit : idempotent
   const now = new Date();
-  await db.lead.update({ where: { id: lead.id }, data: { unsubscribedAt: now, consentMarketing: false } });
-  if (lead.email) {
-    await db.emailSuppression.upsert({ where: { workspaceId_email: { workspaceId, email: lead.email.toLowerCase() } }, create: { workspaceId, email: lead.email.toLowerCase(), reason: "unsubscribe" }, update: {} });
-    await db.consent.create({ data: { workspaceId, leadId: lead.id, email: lead.email.toLowerCase(), type: "marketing", granted: false, source } });
-  }
-  await db.leadActivity.create({ data: { workspaceId, leadId: lead.id, type: "unsubscribed", data: { source } } });
-  await cancelPendingFollowUps(workspaceId, lead.id, "Le prospect s'est désinscrit.");
+  await runTx(async (tx) => {
+    await revokeLeadFollowUps(tx, workspaceId, lead.id, "Le prospect s'est désinscrit.", now);
+    const first = (await tx.lead.updateMany({ where: { id: lead.id, workspaceId, unsubscribedAt: null }, data: { unsubscribedAt: now, consentMarketing: false } })).count === 1;
+    if (lead.email) {
+      const email = lead.email.toLowerCase();
+      const suppressionKey = suppressionWriteKey(workspaceId, email, { fallback: "plain" }); // avec une clé dédiée : HMAC ; sans clé : adresse en clair comme avant
+      await tx.emailSuppression.upsert({ where: { workspaceId_email: { workspaceId, email: suppressionKey } }, create: { workspaceId, email: suppressionKey, reason: "unsubscribe" }, update: {} });
+      if (first) await tx.consent.create({ data: { workspaceId, leadId: lead.id, email, type: "marketing", granted: false, source } });
+    }
+    if (first) await tx.leadActivity.create({ data: { workspaceId, leadId: lead.id, type: "unsubscribed", data: { source } } });
+  });
   return true;
 }
 
-/** Effacement RGPD d'un prospect : données personnelles supprimées, relances annulées, comptabilité agrégée conservée. */
+/**
+ * Conservation de la PREUVE de consentement après effacement (décision juridique NON tranchée : voir docs/followup-reliability.md § 13).
+ * `true` (défaut) : les lignes de consentement sont pseudonymisées (adresse remplacée par une empreinte salée, adresse IP retirée) et conservées ;
+ * `false` : elles sont supprimées. Point de décision unique : aucune autre partie du code ne suppose l'une ou l'autre.
+ */
+export const KEEP_CONSENT_PROOF_AT_ERASURE = true;
+
+const ERASED = "[effacé]";
+
+let eraseHook: ((step: string) => void | Promise<void>) | null = null;
+/** Test uniquement : exécuté entre les étapes de l'effacement (une exception annule toute la transaction). */
+export const setEraseHookForTests = (h: typeof eraseHook) => { eraseHook = h; };
+
+/**
+ * Effacement RGPD d'un prospect : UNE transaction (tout ou rien).
+ *  - SUPPRIMÉS : conversations, contacts, qualifications IA, historique, tâches, notifications du prospect (lien `/leads/<id>`) ;
+ *  - EFFACÉS dans la fiche : nom, coordonnées, message, champs personnalisés, motif de perte (texte libre), adresse IP, référent, URL, texte de consentement ;
+ *  - ANONYMISÉS, conservés : fiche client liée si aucun autre prospect ne la partage (montant conservé pour la comptabilité agrégée), journal d'e-mails (adresse, objet,
+ *    erreur et notes retirés ; résultat fournisseur, identifiants techniques et horodatages conservés : preuve d'un envoi éventuel, résultat tardif encore enregistrable),
+ *    événements analytiques (rattachement au prospect et à la session retirés ; agrégats conservés), résultat des relances (texte remplacé) ;
+ *  - PSEUDONYMISÉS : liste de suppression (empreinte salée, jamais l'adresse en clair) et consentements (voir KEEP_CONSENT_PROOF_AT_ERASURE) ;
+ *  - CONSERVÉS : fiche anonyme du prospect (statuts, dates, montant, attribution), audit (identifiants techniques seulement).
+ * Relances annulées. Un envoi dont l'appel fournisseur est déjà commencé ne peut pas être rappelé : il est tracé avant l'anonymisation du journal.
+ */
 export async function eraseLead(workspaceId: string, leadId: string, actorId?: string | null) {
   const lead = await db.lead.findFirst({ where: { id: leadId, workspaceId } });
   if (!lead) return false;
-  await cancelPendingFollowUps(workspaceId, leadId, "Prospect effacé.");
-  if (lead.email) await db.emailSuppression.upsert({ where: { workspaceId_email: { workspaceId, email: lead.email.toLowerCase() } }, create: { workspaceId, email: lead.email.toLowerCase(), reason: "erasure" }, update: {} });
-  await db.$transaction([
-    db.conversation.deleteMany({ where: { workspaceId, leadId } }),
-    db.contact.deleteMany({ where: { workspaceId, leadId } }),
-    db.aIQualification.deleteMany({ where: { workspaceId, leadId } }),
-    db.leadActivity.deleteMany({ where: { workspaceId, leadId } }),
-    db.emailLog.deleteMany({ where: { workspaceId, leadId } }),
-    db.consent.deleteMany({ where: { workspaceId, leadId } }),
-    db.task.deleteMany({ where: { workspaceId, leadId } }),
-    db.lead.update({
+  const inFlight = await db.emailLog.findMany({ where: { workspaceId, leadId, status: "attempting", callStartedAt: { not: null } }, select: { id: true, followUpId: true } });
+  const customerAnonymized = await runTx(async (tx) => {
+    await revokeLeadFollowUps(tx, workspaceId, leadId, "Prospect effacé.");
+    await eraseHook?.("afterRevoke");
+    if (lead.email) {
+      const email = lead.email.toLowerCase();
+      const key = suppressionWriteKey(workspaceId, email, { fallback: "sha" });
+      // L'entrée pseudonymisée est écrite et VÉRIFIÉE avant que l'ancienne ligne en clair (désinscription antérieure) soit retirée, dans la même transaction.
+      await tx.emailSuppression.upsert({ where: { workspaceId_email: { workspaceId, email: key } }, create: { workspaceId, email: key, reason: "erasure" }, update: { reason: "erasure" } });
+      if (key !== email && (await tx.emailSuppression.findUnique({ where: { workspaceId_email: { workspaceId, email: key } }, select: { id: true } }))) await tx.emailSuppression.deleteMany({ where: { workspaceId, email } });
+      if (KEEP_CONSENT_PROOF_AT_ERASURE) await tx.consent.updateMany({ where: { workspaceId, leadId }, data: { email: key, ipHash: null } });
+    }
+    if (!KEEP_CONSENT_PROOF_AT_ERASURE) await tx.consent.deleteMany({ where: { workspaceId, leadId } });
+    await eraseHook?.("afterConsent");
+    await tx.lead.update({
       where: { id: leadId },
-      data: { name: "Prospect effacé", email: null, phone: null, company: null, message: null, customFields: undefined, ipHash: null, referrer: null, landingUrl: null, consentText: null, consentMarketing: false, deletedAt: new Date() },
-    }),
-  ]);
-  await audit({ workspaceId, userId: actorId, action: "lead.erased", entity: "Lead", entityId: leadId });
+      data: { name: "Prospect effacé", email: null, phone: null, company: null, message: null, customFields: Prisma.DbNull, lostReason: null, ipHash: null, referrer: null, landingUrl: null, consentText: null, consentMarketing: false, deletedAt: new Date() },
+    });
+    let customerDone = false;
+    if (lead.customerId) {
+      const shared = await tx.lead.count({ where: { workspaceId, customerId: lead.customerId, id: { not: leadId }, deletedAt: null } });
+      if (!shared) {
+        customerDone = (await tx.customer.updateMany({ where: { id: lead.customerId, workspaceId }, data: { name: "Client effacé", email: null, phone: null, company: null, notes: null } })).count > 0;
+        await tx.contact.deleteMany({ where: { workspaceId, customerId: lead.customerId } });
+      }
+    }
+    await eraseHook?.("afterCustomer");
+    await tx.conversation.deleteMany({ where: { workspaceId, leadId } });
+    await tx.contact.deleteMany({ where: { workspaceId, leadId } });
+    await tx.aIQualification.deleteMany({ where: { workspaceId, leadId } });
+    await tx.leadActivity.deleteMany({ where: { workspaceId, leadId } });
+    await tx.task.deleteMany({ where: { workspaceId, leadId } });
+    await tx.notification.deleteMany({ where: { workspaceId, href: { startsWith: `/leads/${leadId}` } } });
+    await tx.emailLog.updateMany({ where: { workspaceId, leadId }, data: { to: ERASED, subject: ERASED, error: null, humanNote: null, contradictionAckNote: null } });
+    await tx.analyticsEvent.updateMany({ where: { workspaceId, leadId }, data: { leadId: null, sessionId: null, referrer: null } });
+    await tx.followUp.updateMany({ where: { workspaceId, leadId, result: { not: null } }, data: { result: "Résultat effacé (prospect effacé)." } });
+    await eraseHook?.("beforeCommit");
+    return customerDone;
+  });
+  for (const e of inFlight) await audit({ workspaceId, userId: actorId, action: "email.in_flight_at_revocation", entity: "EmailLog", entityId: e.id, meta: { followUpId: e.followUpId } });
+  await audit({ workspaceId, userId: actorId, action: "lead.erased", entity: "Lead", entityId: leadId, meta: { customerAnonymized, consentProofKept: KEEP_CONSENT_PROOF_AT_ERASURE } });
   return true;
 }
 

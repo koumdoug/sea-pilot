@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { db } from "@/lib/db";
 import { changeLeadStatus, createLead, eraseLead, exportLeadData, qualifyLeadService, unsubscribeLead } from "@/lib/leads";
 import { enrollLead } from "@/lib/followups";
+import { erasedEmailKey } from "@/lib/suppression";
 import { duplicateCampaign, transitionCampaign, CampaignError } from "@/lib/campaigns";
 import { makeWorkspace, resetDb } from "./helpers";
 
@@ -150,8 +151,9 @@ describe("RGPD", () => {
     expect(await db.conversation.count({ where: { leadId: lead.id } })).toBe(0);
     expect(await db.aIQualification.count({ where: { leadId: lead.id } })).toBe(0);
     expect(await exportLeadData(workspaceId, lead.id)).toBeNull();
-    // l'adresse est mise en liste de suppression pour éviter tout renvoi
-    expect(await db.emailSuppression.count({ where: { workspaceId, email: "p@y.com" } })).toBe(1);
+    // l'adresse est mise en liste de suppression (empreinte pseudonymisée, jamais en clair) pour éviter tout renvoi
+    expect(await db.emailSuppression.count({ where: { workspaceId, email: erasedEmailKey(workspaceId, "p@y.com") } })).toBe(1);
+    expect(await db.emailSuppression.count({ where: { workspaceId, email: "p@y.com" } })).toBe(0);
   });
 });
 

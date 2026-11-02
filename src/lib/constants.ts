@@ -36,6 +36,22 @@ export const LEAD_STATUS_LABEL: Record<LeadStatus, string> = {
 // Colonnes du pipeline CRM : Lead → Qualified → Contacted → Proposal → Won/Lost
 export const PIPELINE_COLUMNS: LeadStatus[] = ["new", "qualified", "contacted", "proposal", "won", "lost"];
 export const TERMINAL_STATUSES: LeadStatus[] = ["won", "lost", "disqualified"];
+/** Rang commercial des statuts non terminaux du pipeline : new < contacted < qualified < proposal. */
+export const PIPELINE_RANK: Partial<Record<LeadStatus, number>> = { new: 0, contacted: 1, qualified: 2, proposal: 3 };
+/**
+ * Règle : une relance AUTOMATISÉE ne doit jamais écraser une progression commerciale déjà enregistrée. Renvoie la raison du blocage, ou null si le changement automatique est permis.
+ *  - clôture (« lost », « disqualified ») d'un prospect déjà « qualified » ou « proposal » : la clôture « sans réponse » n'est plus vraie → "closure_after_progress" ;
+ *  - retour en arrière dans le pipeline (statut cible de rang inférieur au statut réel) → "regression".
+ * « contacted » n'est PAS une progression (c'est notre propre prise de contact). Les statuts terminaux ne passent jamais ici (la relance est annulée). « won » n'est jamais bloqué.
+ * Justification documentée dans docs/followup-reliability.md §10. Ne s'applique ni au chemin manuel (décision explicite d'un utilisateur) ni à la décision humaine après examen.
+ */
+export function autoStatusChangeBlockedBy(current: string, target: string): "closure_after_progress" | "regression" | null {
+  const rc = PIPELINE_RANK[current as LeadStatus];
+  if (rc === undefined) return null;
+  if (target === "lost" || target === "disqualified") return rc >= (PIPELINE_RANK.qualified as number) ? "closure_after_progress" : null;
+  const rt = PIPELINE_RANK[target as LeadStatus];
+  return rt !== undefined && rc > rt ? "regression" : null;
+}
 
 export const QUALIFICATION_LEVELS = ["hot", "warm", "cold", "unqualified"] as const;
 export type QualificationLevel = (typeof QUALIFICATION_LEVELS)[number];

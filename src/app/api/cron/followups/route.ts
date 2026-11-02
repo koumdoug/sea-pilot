@@ -1,6 +1,7 @@
 import { env } from "@/lib/env";
 import { safeEqual } from "@/lib/crypto";
-import { processDueFollowUps } from "@/lib/followups";
+import { processDueFollowUps, type ProcessSummary } from "@/lib/followups";
+import { reconcileAcceptedReviews } from "@/lib/followup-review";
 import { listSyncableIntegrations, syncIntegration } from "@/lib/integrations/service";
 import { log, errMsg } from "@/lib/logger";
 import { reconcileDueSubscriptions, stripeConfigured, type ReconcileSummary } from "@/lib/billing";
@@ -15,12 +16,18 @@ const CRON_BUDGET_MS = 240_000;
 const CRON_RECONCILE_BUDGET_MS = 90_000;
 /** Durée maximale d'une synchronisation d'intégration (un appel externe) : aucune n'est commencée si elle ne peut pas se terminer dans le budget. */
 const SYNC_ITEM_RESERVE_MS = 30_000;
+/**
+ * Budget des relances (bien inférieur au bail de 5 minutes) : aucune relance n'est commencée s'il reste moins de 30 s (appel fournisseur ≤ 20 s + écritures).
+ * Ce qui n'a pas pu être traité reste en attente et est repris au passage suivant (`deferred`).
+ */
+const CRON_FOLLOWUPS_BUDGET_MS = 75_000;
 
 /**
  * Tâche planifiée (toutes les 5 à 15 minutes) : exécute les relances échues, synchronise les plateformes publicitaires AUTORISÉES et réconcilie les abonnements Stripe.
  * Protégée par `Authorization: Bearer $CRON_SECRET`. Paramètres : `sync=0` (sans intégrations), `reconcile=0` (sans Stripe).
- * Passages concurrents sans danger : les relances se réservent atomiquement, la réconciliation tient un bail par abonnement. Tout ce qui n'a pas pu être traité
- * dans le budget est DIFFÉRÉ (jamais signalé comme réussi) et repris au passage suivant ; `complete: false` l'indique dans la réponse et dans les journaux.
+ * Passages concurrents sans danger : les relances se réservent atomiquement (bail), la réconciliation tient un bail par abonnement. Chaque traitement est ISOLÉ :
+ * l'échec des relances n'empêche ni les synchronisations, ni la réconciliation Stripe, ni la purge. Tout ce qui n'a pas pu être traité dans le budget est DIFFÉRÉ
+ * (jamais signalé comme réussi) ; `complete: false` l'indique dans la réponse et dans les journaux.
  */
 async function handle(req: Request) {
   const secret = env.cronSecret;
@@ -29,18 +36,31 @@ async function handle(req: Request) {
   if (!given || !safeEqual(given, secret)) return Response.json({ error: "Non autorisé." }, { status: 401 });
 
   const startedAt = Date.now();
-  const followups = await processDueFollowUps();
   const url = new URL(req.url);
 
-  const syncs = { ok: 0, errors: 0, skippedInactive: 0, skippedOverLimit: 0, deferred: 0 };
+  let followups: ProcessSummary | { crashed: true };
+  try {
+    await reconcileAcceptedReviews();
+    followups = await processDueFollowUps({ deadlineAt: startedAt + CRON_FOLLOWUPS_BUDGET_MS });
+  } catch (e) {
+    log.error("cron.followups_failed", { error: errMsg(e) });
+    followups = { crashed: true };
+  }
+
+  const syncs = { ok: 0, errors: 0, skippedInactive: 0, skippedOverLimit: 0, deferred: 0, planFailed: false };
   if (url.searchParams.get("sync") !== "0") {
-    // Seules les synchronisations que le forfait autorise sont lancées (abonnement actif, dans la limite d'intégrations) ; les connexions sont conservées.
-    const plan = await listSyncableIntegrations();
-    syncs.skippedInactive = plan.skippedInactive; syncs.skippedOverLimit = plan.skippedOverLimit;
-    for (let i = 0; i < plan.allowed.length; i++) {
-      if (Date.now() - startedAt + CRON_RECONCILE_BUDGET_MS + SYNC_ITEM_RESERVE_MS > CRON_BUDGET_MS) { syncs.deferred = plan.allowed.length - i; break; }
-      const it = plan.allowed[i];
-      try { await syncIntegration(it.workspaceId, it.provider); syncs.ok++; } catch (e) { syncs.errors++; log.warn("cron.sync_failed", { provider: it.provider, error: errMsg(e) }); }
+    try {
+      // Seules les synchronisations que le forfait autorise sont lancées (abonnement actif, dans la limite d'intégrations) ; les connexions sont conservées.
+      const plan = await listSyncableIntegrations();
+      syncs.skippedInactive = plan.skippedInactive; syncs.skippedOverLimit = plan.skippedOverLimit;
+      for (let i = 0; i < plan.allowed.length; i++) {
+        if (Date.now() - startedAt + CRON_RECONCILE_BUDGET_MS + SYNC_ITEM_RESERVE_MS > CRON_BUDGET_MS) { syncs.deferred = plan.allowed.length - i; break; }
+        const it = plan.allowed[i];
+        try { await syncIntegration(it.workspaceId, it.provider); syncs.ok++; } catch (e) { syncs.errors++; log.warn("cron.sync_failed", { provider: it.provider, error: errMsg(e) }); }
+      }
+    } catch (e) {
+      syncs.planFailed = true;
+      log.error("cron.sync_plan_failed", { error: errMsg(e) });
     }
   }
 
@@ -54,9 +74,11 @@ async function handle(req: Request) {
   // Purge du registre des événements Stripe (rétention 90 jours, jamais d'événement en cours) ; une erreur de purge n'affecte rien d'autre.
   let ledgerPurged: { processed: number; failed: number } | { skipped: true } = { skipped: true };
   if (url.searchParams.get("purge") !== "0") { try { ledgerPurged = await purgeStripeEvents(); } catch (e) { log.warn("cron.ledger_purge_failed", { error: errMsg(e) }); } }
-  const complete = syncs.deferred === 0 && ("skipped" in billing || billing.complete);
-  log.info("cron.summary", { complete, syncs, billing, elapsedMs: Date.now() - startedAt });
-  return Response.json({ followups, syncs: syncs.ok + syncs.errors, syncErrors: syncs.errors, syncSkipped: { inactive: syncs.skippedInactive, overLimit: syncs.skippedOverLimit }, syncDeferred: syncs.deferred, billing, ledgerPurged, complete });
+
+  const followupsComplete = !("crashed" in followups) && followups.deferred === 0;
+  const complete = followupsComplete && syncs.deferred === 0 && !syncs.planFailed && ("skipped" in billing || billing.complete);
+  log.info("cron.summary", { complete, followups, syncs, billing, elapsedMs: Date.now() - startedAt });
+  return Response.json({ followups, syncs: syncs.ok + syncs.errors, syncErrors: syncs.errors, syncSkipped: { inactive: syncs.skippedInactive, overLimit: syncs.skippedOverLimit }, syncDeferred: syncs.deferred, syncPlanFailed: syncs.planFailed, billing, ledgerPurged, complete });
 }
 
 export const GET = handle;

@@ -9,6 +9,7 @@ const rows: [string, boolean, string][] = [
   ["SESSION_SECRET (>= 32 car.)", (process.env.SESSION_SECRET ?? "").length >= 32, "obligatoire"],
   ["APP_URL", has("APP_URL"), "obligatoire en production"],
   ["CRON_SECRET", has("CRON_SECRET"), "relances automatiques et synchronisations"],
+  ["SUPPRESSION_HMAC_KEY (>= 32 car., dédiée)", (process.env.SUPPRESSION_HMAC_KEY ?? "").length >= 32 && process.env.SUPPRESSION_HMAC_KEY !== process.env.SESSION_SECRET && process.env.SUPPRESSION_HMAC_KEY !== process.env.ENCRYPTION_KEY, "liste de suppression (sans elle : repli sans secret)"],
   ["IA (OPENAI_*, ANTHROPIC_API_KEY ou GEMINI_*)", (has("OPENAI_API_KEY") && has("OPENAI_MODEL")) || has("ANTHROPIC_API_KEY") || (has("GEMINI_API_KEY") && has("GEMINI_MODEL")), "fonctions IA"],
   ["RESEND_API_KEY + EMAIL_FROM", has("RESEND_API_KEY") && has("EMAIL_FROM"), "e-mails système"],
   ["STRIPE_SECRET_KEY + STRIPE_PRICE_*", has("STRIPE_SECRET_KEY") && has("STRIPE_PRICE_STARTER") && has("STRIPE_PRICE_GROWTH") && has("STRIPE_PRICE_PRO"), "paiement"],

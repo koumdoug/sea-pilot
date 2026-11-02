@@ -38,6 +38,7 @@ Toutes documentées dans [`.env.example`](.env.example). Obligatoires : `DATABAS
 | Paiement | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_STARTER/GROWTH/PRO` | Essai uniquement, pas de souscription |
 | Plateformes | `GOOGLE_CLIENT_ID/SECRET` (+`GOOGLE_ADS_DEVELOPER_TOKEN`), `META_APP_ID/SECRET`, `TIKTOK_APP_ID/SECRET` | Carte « Configuration requise » ; saisie/import CSV des dépenses |
 | Relances auto | `CRON_SECRET` | Bouton manuel « Exécuter les relances échues » |
+| Liste de suppression | `SUPPRESSION_HMAC_KEY` (clé HMAC dédiée, ≥ 32 car., distincte de `SESSION_SECRET` et `ENCRYPTION_KEY`) ; `SUPPRESSION_HMAC_KEY_PREVIOUS` (anciennes clés, séparées par des virgules, lecture seule : à conserver tant que des entrées qu'elles protègent existent) | Repli sûr et journalisé (adresse en clair pour une désinscription, empreinte sans secret pour un effacement). Une clé retirée alors que des entrées HMAC existent bloque les envois de l'espace (échec fermé, motif affiché). Voir [`docs/followup-reliability.md`](docs/followup-reliability.md) § 15 |
 
 ## Base de données et Prisma
 
@@ -52,11 +53,14 @@ Toutes documentées dans [`.env.example`](.env.example). Obligatoires : `DATABAS
 npm run dev              # développement
 npm run typecheck        # tsc --noEmit
 npm run lint             # ESLint
-npm test                 # Vitest : unitaires + intégration (base SQLite jetable prisma/test.db)
+npm test                 # Vitest : unitaires + intégration (base SQLite jetable prisma/test.db, recréée à chaque exécution)
+npm run test:pg          # même suite sur un PostgreSQL JETABLE local (verrous et concurrence réels) : prérequis ci-dessous
 npm run build            # prisma generate + next build
 npm start                # serveur de production
 npm run test:e2e         # Playwright (nécessite `npm run build` ; base prisma/e2e.db jetable, port 3101)
 ```
+
+**Prérequis de `npm run test:pg`** (la suite SUPPRIME des données ; sa garde `tests/global-setup-pg.ts` refuse tout autre cas) : base PostgreSQL locale dont le nom commence par `sea_pilot_throwaway_` (hôte `127.0.0.1` ou `localhost`), migrations appliquées (`npx prisma migrate deploy --schema prisma/postgres/schema.prisma`), client Prisma PostgreSQL généré (`node scripts/prisma-generate.mjs` avec l'URL PostgreSQL dans `DATABASE_URL`), et `PG_THROWAWAY_CONFIRM=yes`. Ensuite, regénérer le client SQLite (`node scripts/prisma-generate.mjs` sans URL PostgreSQL, ou `npm run build`). Procédure complète : [`docs/validation-postgresql-stripe.md`](docs/validation-postgresql-stripe.md). Les tests `pg-*` sont ignorés sous SQLite.
 
 ## Déploiement
 

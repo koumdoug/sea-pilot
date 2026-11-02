@@ -13,7 +13,7 @@ Next.js 16 (App Router, server components + server actions) · React 19 · TypeS
 | Campagnes | `campaigns.ts` (cycle de vie, duplication, UTM) |
 | Landing / formulaires / leads | `landing.ts` (sections texte, anti-XSS), `public-leads.ts`, `leads.ts` (création, statuts, client, RGPD) |
 | Qualification | `scoring.ts` (règles configurables, faits vs inférences), `leads.ts` (fusion IA contrôlée) |
-| Relances | `followups.ts`, `email.ts` (consentement, suppression, désinscription) |
+| Relances | `followups.ts`, `followup-runtime.ts` (bail, transactions), `followup-send.ts` (envoi), `followup-review.ts` (résolution humaine), `email.ts` (consentement, suppression, désinscription) — voir [docs/followup-reliability.md](docs/followup-reliability.md) |
 | Analytics | `kpi.ts`, `analytics.ts`, `recommendations.ts`, `insights.ts`, `copilot.ts` |
 | IA | `ai/service.ts` (point d'entrée unique), `ai/providers.ts` (OpenAI/Anthropic/Gemini), `ai/errors.ts` |
 | Intégrations | `integrations/{types,providers,service}.ts` |

@@ -7,7 +7,7 @@ import { providerStatus } from "@/lib/ai/providers";
 import { LEAD_STATUSES, LEAD_STATUS_LABEL, FOLLOWUP_ACTION_LABEL } from "@/lib/constants";
 import type { CriterionResult } from "@/lib/scoring";
 import { Alert, Badge, Card, KeyValue, PageHeader, Section, fmtDate } from "@/components/ui";
-import { ActionForm, InlineAction, SelectField, SubmitButton, TextAreaField, TextField } from "@/components/forms";
+import { ActionForm, CheckField, InlineAction, SelectField, SubmitButton, TextAreaField, TextField } from "@/components/forms";
 import { LevelBadge, StatusBadge } from "@/components/lead-badges";
 import { addConversationAction, addTaskAction, cancelFollowUpsAction, changeStatusAction, enrollSequenceAction, eraseLeadAction, qualifyAction, toggleTaskAction, unsubscribeAction, updateLeadAction } from "../actions";
 
@@ -51,6 +51,7 @@ export default async function LeadPage({ params }: { params: Promise<{ id: strin
                   <TextField name="email" label="E-mail" type="email" defaultValue={lead.email} /><TextField name="phone" label="Téléphone" type="tel" defaultValue={lead.phone} />
                   <TextField name="value" label={`Valeur de l'affaire (${ctx.workspace.currency})`} type="number" min={0} step="0.01" defaultValue={lead.value} help="Utilisée comme revenu attribué lorsque le lead est gagné." />
                 </div>
+                <CheckField name="consent" label="Le prospect a consenti à recevoir des e-mails marketing à cette adresse (consentement attesté par vous)" help="Changer l'adresse révoque le consentement lié à l'ancienne ; cochez cette case uniquement si vous disposez d'un consentement pour l'adresse saisie. Aucun message n'est envoyé automatiquement." />
                 <SubmitButton>Enregistrer</SubmitButton>
               </ActionForm>
             ) : <KeyValue items={[["E-mail", lead.email], ["Téléphone", lead.phone], ["Entreprise", lead.company]]} />}

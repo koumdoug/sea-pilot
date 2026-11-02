@@ -5,6 +5,7 @@ import { db } from "../db";
 import { audit } from "../audit";
 import { slugify } from "../workspaces";
 import { DEFAULT_PRODUCTS } from "./catalog";
+import { UNKNOWN_KEY_REASON, suppressionStatus, suppressionWriteKey, type SuppressionStatus } from "../suppression";
 import {
   contactEligibility, dedupeKeyOf, domainOf, eventDedupeKey, normalizeEmail, EVENT_TYPES, LEGAL_BASES, OUTREACH_CHANNELS,
   type Eligibility, type ImportRow, type ProductEventType,
@@ -55,10 +56,12 @@ export type AddProspectResult =
   | { kind: "created"; prospect: Prospect }
   | { kind: "duplicate"; prospect: Prospect; interestAdded: boolean };
 
-async function isSuppressed(workspaceId: string, email: string | null): Promise<boolean> {
-  if (!email) return false;
-  if (await db.emailSuppression.findUnique({ where: { workspaceId_email: { workspaceId, email } }, select: { id: true } })) return true;
-  return !!(await db.lead.findFirst({ where: { workspaceId, email, unsubscribedAt: { not: null } }, select: { id: true } }));
+/** « unknown_key » : la liste est illisible faute de clé — échec fermé (jamais « envoyable »), motif explicite. */
+async function suppressionVerdict(workspaceId: string, email: string | null): Promise<SuppressionStatus> {
+  if (!email) return "clear";
+  const s = await suppressionStatus(db, workspaceId, email);
+  if (s !== "clear") return s;
+  return (await db.lead.findFirst({ where: { workspaceId, email, unsubscribedAt: { not: null } }, select: { id: true } })) ? "listed" : "clear";
 }
 
 async function assertProduct(workspaceId: string, productId: string) {
@@ -83,7 +86,10 @@ export async function addProspect(workspaceId: string, i: NewProspect, actorId?:
   const existing = await db.prospect.findUnique({ where: { workspaceId_dedupeKey: { workspaceId, dedupeKey } } });
   if (existing) return { kind: "duplicate", prospect: existing, interestAdded: await noteInterest(workspaceId, existing, i.productId ?? null, actorId) };
 
-  const suppressed = await isSuppressed(workspaceId, email);
+  const verdict = await suppressionVerdict(workspaceId, email);
+  // Liste illisible : aucune fiche n'est créée (ni « ne pas contacter » à tort, qui serait définitif, ni « identifiée » sans contrôle).
+  if (verdict === "unknown_key") throw new PortfolioError(UNKNOWN_KEY_REASON);
+  const suppressed = verdict !== "clear";
   try {
     const prospect = await db.prospect.create({
       data: {
@@ -169,7 +175,7 @@ export async function optOutProspect(p: { workspaceId: string; prospectId: strin
   if (!pr) throw new PortfolioError("Prospect introuvable.");
   if (pr.optedOutAt && pr.status === "do_not_contact") return pr; // rejeu
   const u = await db.prospect.update({ where: { id: pr.id }, data: { status: "do_not_contact", optedOutAt: pr.optedOutAt ?? new Date(), campaignId: null, nextFollowUpAt: null } });
-  if (pr.email) await db.emailSuppression.upsert({ where: { workspaceId_email: { workspaceId: p.workspaceId, email: pr.email } }, create: { workspaceId: p.workspaceId, email: pr.email, reason: "prospect_opt_out" }, update: {} });
+  if (pr.email) { const key = suppressionWriteKey(p.workspaceId, pr.email, { fallback: "plain" }); await db.emailSuppression.upsert({ where: { workspaceId_email: { workspaceId: p.workspaceId, email: key } }, create: { workspaceId: p.workspaceId, email: key, reason: "prospect_opt_out" }, update: {} }); }
   await audit({ workspaceId: p.workspaceId, userId: p.actorId, action: "prospect.opted_out", entity: "Prospect", entityId: pr.id, meta: { reason: p.reason ?? null } });
   return u;
 }
@@ -183,7 +189,7 @@ export async function eraseProspect(p: { workspaceId: string; prospectId: string
   const pr = await db.prospect.findFirst({ where: { id: p.prospectId, workspaceId: p.workspaceId } });
   if (!pr) return false;
   if (pr.name === ERASED_NAME && pr.deletedAt) return true; // rejeu
-  if (pr.email) await db.emailSuppression.upsert({ where: { workspaceId_email: { workspaceId: p.workspaceId, email: pr.email } }, create: { workspaceId: p.workspaceId, email: pr.email, reason: "prospect_erased" }, update: {} });
+  if (pr.email) { const key = suppressionWriteKey(p.workspaceId, pr.email, { fallback: "plain" }); await db.emailSuppression.upsert({ where: { workspaceId_email: { workspaceId: p.workspaceId, email: key } }, create: { workspaceId: p.workspaceId, email: key, reason: "prospect_erased" }, update: {} }); }
   await db.$transaction([
     db.prospectContact.deleteMany({ where: { workspaceId: p.workspaceId, prospectId: pr.id } }),
     db.prospectProduct.deleteMany({ where: { workspaceId: p.workspaceId, prospectId: pr.id } }),
@@ -211,17 +217,19 @@ async function concurrentCampaignFor(workspaceId: string, prospect: Prospect, pr
 export async function checkEligibility(p: { workspaceId: string; prospectId: string; productId: string; channel: string; templateId?: string | null; now?: Date }): Promise<Eligibility> {
   const prospect = await db.prospect.findFirst({ where: { id: p.prospectId, workspaceId: p.workspaceId } });
   if (!prospect) return { ok: false, reasons: ["Prospect introuvable."] };
-  const [product, channelSetting, template, suppressed, concurrent] = await Promise.all([
+  const [product, channelSetting, template, verdict, concurrent] = await Promise.all([
     db.product.findFirst({ where: { id: p.productId, workspaceId: p.workspaceId }, select: { status: true, deletedAt: true } }),
     db.outreachChannel.findUnique({ where: { workspaceId_channel: { workspaceId: p.workspaceId, channel: p.channel } } }),
     p.templateId === undefined ? Promise.resolve(undefined) : db.messageTemplate.findFirst({ where: { id: p.templateId ?? "", workspaceId: p.workspaceId }, select: { status: true, productId: true, channel: true } }),
-    isSuppressed(p.workspaceId, prospect.email),
+    suppressionVerdict(p.workspaceId, prospect.email),
     concurrentCampaignFor(p.workspaceId, prospect, p.productId),
   ]);
-  return contactEligibility({
-    now: p.now, channel: p.channel, productId: p.productId, product, prospect, suppressed, channelSetting,
+  const result = contactEligibility({
+    now: p.now, channel: p.channel, productId: p.productId, product, prospect, suppressed: verdict !== "clear", channelSetting,
     template: template === undefined ? undefined : template, concurrentCampaign: concurrent,
   });
+  if (verdict === "unknown_key" && !result.ok) return { ...result, reasons: result.reasons.map((r) => (r === "L'adresse figure dans la liste de désinscription." ? UNKNOWN_KEY_REASON : r)) };
+  return result;
 }
 
 export async function logContact(p: {

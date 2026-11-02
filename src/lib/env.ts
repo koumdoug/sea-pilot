@@ -26,6 +26,10 @@ export const env = {
   /** Identifiants d'utilisateurs (cuid) dont l'espace dont ils sont propriétaires est exempté de facturation. Vide = aucune exception. */
   get freeAccessUserIds(): string[] { return (opt("FREE_ACCESS_USER_IDS") ?? "").split(",").map((x) => x.trim()).filter(Boolean); },
   get cronSecret() { return opt("CRON_SECRET"); },
+  /** Clé HMAC DÉDIÉE de la liste de suppression (>= 32 caractères, distincte de SESSION_SECRET et ENCRYPTION_KEY). Absente : repli sûr et journalisé (voir src/lib/suppression.ts). */
+  get suppressionKey() { return opt("SUPPRESSION_HMAC_KEY"); },
+  /** Anciennes clés (séparées par des virgules), en lecture seule : les entrées qu'elles protègent restent reconnues pendant et après une rotation. */
+  get suppressionKeysPrevious(): string[] { return (opt("SUPPRESSION_HMAC_KEY_PREVIOUS") ?? "").split(",").map((x) => x.trim()).filter(Boolean); },
   get trialDays() { return int("TRIAL_DAYS", 14); },
   // IA
   get aiProvider() { return (opt("AI_PROVIDER") ?? "").toLowerCase(); }, // openai | anthropic | gemini | "" (premier fournisseur configuré)

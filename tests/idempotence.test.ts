@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { db } from "@/lib/db";
 import { changeLeadStatus, createLead, unsubscribeLead } from "@/lib/leads";
 import { enrollLead, processDueFollowUps } from "@/lib/followups";
-import { setEmailProviderForTests, type EmailProvider, type OutgoingEmail } from "@/lib/email";
+import { EmailError, setEmailProviderForTests, type EmailProvider, type OutgoingEmail } from "@/lib/email";
 import { makeWorkspace, resetDb } from "./helpers";
 
 beforeEach(resetDb);
@@ -36,10 +36,10 @@ describe("idempotence : inscription et exécution", () => {
     expect(await db.followUp.count({ where: { workspaceId, status: "done" } })).toBe(20);
   });
 
-  it("erreur du fournisseur d'e-mail puis nouvelle exécution : pas de renvoi, pas de tâche en double", async () => {
+  it("refus explicite du fournisseur (4xx) puis nouvelle exécution : pas de renvoi, pas de tâche en double", async () => {
     const { workspaceId } = await makeWorkspace();
     let calls = 0;
-    const flaky: EmailProvider = { id: "flaky", async send() { calls++; throw new Error("réseau indisponible"); } };
+    const flaky: EmailProvider = { id: "flaky", async send() { calls++; throw new EmailError("Resend HTTP 422", { kind: "rejected", status: 422 }); } };
     setEmailProviderForTests(flaky);
     const seq = await db.followUpSequence.create({ data: { workspaceId, name: "S", sendEmails: true, steps: [{ day: 0, action: "email", subject: "s", body: "b" }] } });
     const { lead } = await createLead({ workspaceId, name: "M", email: "m@y.com", consentMarketing: true });

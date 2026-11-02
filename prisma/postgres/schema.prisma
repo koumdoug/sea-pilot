@@ -648,9 +648,18 @@ model FollowUp {
   action      String // email | task | reminder | status_change
   payload     Json?
   dueAt       DateTime
-  status      String            @default("pending") // pending | done | skipped | cancelled | failed | blocked
+  status      String            @default("pending") // pending | running | done | skipped | cancelled | failed | blocked | needs_review
   executedAt  DateTime?
   result      String?
+  // Bail de traitement : un seul exécuteur à la fois ; le jeton ferme toute écriture finale (un ancien exécuteur ne peut plus rien écrire). Une ligne « running » SANS jeton est une ancienne ligne : jamais reprise automatiquement.
+  leaseToken            String?
+  leaseUntil            DateTime?
+  // Autorisations métier validées (plafond de 3, incrément atomique dans la transaction d'autorisation) ; échecs techniques (transaction annulée avant tout effet, abandon constaté) comptés à part.
+  attemptCount          Int       @default(0)
+  technicalFailureCount Int       @default(0)
+  lastAttemptAt         DateTime?
+  retryAfter            DateTime? // report après un échec technique ou un envoi non commencé (l'échéance dueAt n'est pas modifiée)
+  failureKind           String? // technical | business | exhausted | technical_persistent | email_uncertain | revoked | sequence_inactive
   createdAt   DateTime          @default(now())
   workspace   Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   lead        Lead              @relation(fields: [leadId], references: [id], onDelete: Cascade)
@@ -658,6 +667,8 @@ model FollowUp {
 
   @@index([workspaceId, status, dueAt])
   @@index([leadId])
+  @@index([status, leaseUntil])
+  @@index([status, retryAfter])
 }
 
 model Task {
@@ -838,14 +849,33 @@ model EmailLog {
   to                String
   subject           String
   provider          String
-  status            String // sent | failed
+  // Résultat côté fournisseur uniquement : attempting (tentative commencée, résultat inconnu) | sent (accepté) | failed (refus explicite) | uncertain (résultat indéterminé) | aborted (aucun appel commencé)
+  status            String
   providerMessageId String?
   error             String?
   createdAt         DateTime  @default(now())
+  // Une ligne par tentative d'envoi d'une relance (identifiant déterministe el:<followUpId>:<n>). Sans clé étrangère : la trace ne disparaît pas avec la relance.
+  followUpId        String?
+  attemptNo         Int?
+  idempotencyKey    String?
+  payloadHash       String?
+  httpStatus        Int?
+  authorizedAt      DateTime? // autorisation d'envoi validée (horloge de la base sous PostgreSQL)
+  callStartedAt     DateTime? // marque posée juste avant l'appel fournisseur : l'appel a POTENTIELLEMENT commencé (ne prouve pas la transmission)
+  finishedAt        DateTime?
+  // Décision humaine : colonnes distinctes du résultat fournisseur (jamais mélangées)
+  humanVerdict         String? // confirmed_sent | confirmed_not_sent
+  humanVerdictAt       DateTime?
+  humanVerdictById     String?
+  humanNote            String?
+  contradictionAckAt   DateTime?
+  contradictionAckById String?
+  contradictionAckNote String?
   workspace         Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   lead              Lead?     @relation(fields: [leadId], references: [id], onDelete: SetNull)
 
   @@index([workspaceId, createdAt])
+  @@index([followUpId])
 }
 
 // ───────────────────────── Portefeuille multi-produits (SEA Pilot = moteur interne de croissance) ─────────────────────────

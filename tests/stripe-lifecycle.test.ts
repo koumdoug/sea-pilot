@@ -19,6 +19,17 @@ const event = (type: string, object: Record<string, unknown>, id = `evt_${++seq}
 const subPayload = (workspaceId: string, over: Record<string, unknown> = {}) => ({ id: "sub_1", customer: "cus_1", status: "active", metadata: { workspaceId, plan: "growth" }, items: { data: [{ price: { id: "price_growth_test" } }] }, current_period_end: inDays(30), ...over });
 const sub = (workspaceId: string) => db.subscription.findUniqueOrThrow({ where: { workspaceId } });
 const send = (ev: StripeEvent) => handleStripeEvent(ev, fake);
+/** Chien de garde : fait échouer clairement une attente qui n'aboutit pas (jamais utilisé comme garantie de chevauchement). */
+const bounded = <T>(p: Promise<T>, what: string, ms = 10_000) => new Promise<T>((resolve, reject) => {
+  const t = setTimeout(() => reject(new Error(`délai dépassé : ${what}`)), ms);
+  p.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
+});
+/** Vrai si toutes les promesses sont réglées (réussies ou rejetées) dans le délai. */
+const settledWithin = async (ps: Promise<unknown>[], ms: number) => {
+  let t: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<boolean>((resolve) => { t = setTimeout(() => resolve(false), ms); });
+  try { return await Promise.race([Promise.allSettled(ps).then(() => true), timeout]); } finally { clearTimeout(t); }
+};
 
 async function setup() {
   const w = await makeWorkspace();
@@ -94,9 +105,28 @@ describe("D3 — déduplication atomique et registre des événements", () => {
   });
 
   it("4. même événement livré SIMULTANÉMENT : un seul exécuteur, l'autre est écarté (409 : Stripe réessaiera)", async () => {
-    const { workspaceId } = await setup(); fake.set("sub_1", { status: "active" }); fake.lagMs = 25;
+    const { workspaceId } = await setup(); fake.set("sub_1", { status: "active" });
     const ev = event("customer.subscription.updated", subPayload(workspaceId), "evt_race");
-    const results = await Promise.all([send(ev), send(ev), send(ev), send(ev)]);
+    // Chevauchement CONTRÔLÉ, sans latence simulée : l'unique exécuteur qui obtient la réservation est suspendu chez Stripe (après avoir lu l'état) jusqu'à `release()`.
+    // Tant qu'il l'est, l'événement est « processing » : les trois autres livraisons ne peuvent être que des doublons « en cours », quelle que soit la vitesse de la base.
+    const hold = fake.holdNextRead();
+    const losers: Awaited<ReturnType<typeof send>>[] = [];
+    let threeLosers!: () => void;
+    const threeAnswered = new Promise<void>((resolve) => { threeLosers = resolve; });
+    const deliveries = [1, 2, 3, 4].map(() => send(ev).then((r) => { if (r.duplicate) { losers.push(r); if (losers.length === 3) threeLosers(); } return r; })); // quatre livraisons au même instant
+    deliveries.forEach((d) => d.catch(() => undefined)); // un rejet est observé dès sa survenue (jamais d'« unhandled rejection ») ; il reste visible via Promise.all ci-dessous
+    let drained = true;
+    try {
+      await bounded(hold.entered, "aucun exécuteur n'a atteint Stripe"); //  exactement un exécuteur a réservé l'événement et attend la réponse de Stripe
+      await bounded(threeAnswered, "les trois autres livraisons n'ont pas répondu"); // elles ont répondu alors que l'exécuteur est encore suspendu
+      expect(losers).toEqual([{ handled: false, duplicate: true, inProgress: true }, { handled: false, duplicate: true, inProgress: true }, { handled: false, duplicate: true, inProgress: true }]);
+      expect(await db.stripeEvent.findUniqueOrThrow({ where: { id: "evt_race" } })).toMatchObject({ status: "processing" }); // pas encore traité : le chevauchement est réel
+    } finally {
+      hold.release(); //                               libération GARANTIE : même si une assertion échoue ou si `hold.entered` n'aboutit pas, aucune lecture ne reste suspendue
+      drained = await settledWithin(deliveries, 10_000); // et aucune livraison encore active ne peut écrire en base pendant le test suivant
+    }
+    expect(drained, "des livraisons sont restées actives après la libération").toBe(true);
+    const results = await Promise.all(deliveries);
     expect(results.filter((r) => r.handled)).toHaveLength(1);
     expect(results.filter((r) => r.duplicate && r.inProgress)).toHaveLength(3);
     expect(await db.stripeEvent.count({ where: { id: "evt_race" } })).toBe(1);

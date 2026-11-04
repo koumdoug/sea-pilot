@@ -35,7 +35,7 @@ Toutes documentées dans [`.env.example`](.env.example). Obligatoires : `DATABAS
 | IA | `OPENAI_API_KEY`+`OPENAI_MODEL`, ou `ANTHROPIC_API_KEY`, ou `GEMINI_API_KEY`+`GEMINI_MODEL` (`AI_PROVIDER` pour forcer) | « Configuration requise » ; qualification par règles, stratégie chiffrée et recommandations restent fonctionnelles |
 | E-mail système | `RESEND_API_KEY`, `EMAIL_FROM` | Reset de mot de passe : écrit en console (dev) / non envoyé (prod, erreur journalisée) |
 | Relances e-mail | clé Resend du **client** (Integrations → E-mail) | Étapes e-mail → tâches manuelles |
-| Paiement | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_STARTER/GROWTH/PRO` | Essai uniquement, pas de souscription |
+| Paiement | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_STARTER/GROWTH/PRO` ; optionnel : `STRIPE_PRICE_<FORFAIT>_LEGACY` (anciens prix, voir [`docs/stripe-hardening.md`](docs/stripe-hardening.md) § 10) | Essai uniquement, pas de souscription |
 | Plateformes | `GOOGLE_CLIENT_ID/SECRET` (+`GOOGLE_ADS_DEVELOPER_TOKEN`), `META_APP_ID/SECRET`, `TIKTOK_APP_ID/SECRET` | Carte « Configuration requise » ; saisie/import CSV des dépenses |
 | Relances auto | `CRON_SECRET` | Bouton manuel « Exécuter les relances échues » |
 | Liste de suppression | `SUPPRESSION_HMAC_KEY` (clé HMAC dédiée, ≥ 32 car., distincte de `SESSION_SECRET` et `ENCRYPTION_KEY`) ; `SUPPRESSION_HMAC_KEY_PREVIOUS` (anciennes clés, séparées par des virgules, lecture seule : à conserver tant que des entrées qu'elles protègent existent) | Repli sûr et journalisé (adresse en clair pour une désinscription, empreinte sans secret pour un effacement). Une clé retirée alors que des entrées HMAC existent bloque les envois de l'espace (échec fermé, motif affiché). Voir [`docs/followup-reliability.md`](docs/followup-reliability.md) § 15 |
@@ -66,7 +66,7 @@ npm run test:e2e         # Playwright (nécessite `npm run build` ; base prisma/
 
 1. Provisionner PostgreSQL ; définir `DATABASE_URL`, `SESSION_SECRET`, `ENCRYPTION_KEY`, `APP_URL`, `CRON_SECRET`, `LEGAL_ENTITY_NAME`, `LEGAL_CONTACT_EMAIL`.
 2. `npm ci && npm run build` ; appliquer les migrations PostgreSQL (ci-dessus) ; `npm start` (port `PORT`).
-3. Planifier toutes les 5–15 min : `curl -H "Authorization: Bearer $CRON_SECRET" $APP_URL/api/cron/followups` (relances échues + synchronisation des plateformes publicitaires).
+3. Planifier toutes les 5–15 min : `curl -H "Authorization: Bearer $CRON_SECRET" $APP_URL/api/cron/followups` (relances échues + synchronisation des plateformes publicitaires + réconciliation Stripe). La réponse JSON porte `complete` et `disabledStages` ; sans clé Stripe, `complete` reste vrai en mode essai mais devient faux si des abonnements sont liés à Stripe (voir [`docs/stripe-hardening.md`](docs/stripe-hardening.md) § 5).
 4. Santé : `GET /api/health`.
 5. Limitation de débit : en mémoire (instance unique). Pour plusieurs instances, remplacer `src/lib/rate-limit.ts` par un store partagé (Redis) — même interface.
 

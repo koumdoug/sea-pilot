@@ -8,7 +8,7 @@ import { getProvider } from "./ai/providers";
 import { baseSystem, qualificationAiSchema, qualificationPrompt } from "./ai/prompts";
 import { slugify } from "./workspaces";
 import { cancelPendingFollowUps, enrollLead, revokeLeadFollowUps } from "./followups";
-import { TxAbort, runTx } from "./followup-runtime";
+import { TX_RETRY_CODES, TxAbort, runTx } from "./followup-runtime";
 import { suppressionWriteKey } from "./suppression";
 import { log, errMsg } from "./logger";
 
@@ -369,6 +369,17 @@ export async function qualifyLeadService(p: { workspaceId: string; leadId: strin
 // ───────────────────────── RGPD ─────────────────────────
 
 /**
+ * Codes de reprise des transactions qui écrivent une entrée de la liste de suppression (désinscription, effacement) : les codes habituels, PLUS `P2002`.
+ * Une insertion concurrente de la MÊME entrée (typiquement le backfill de la liste, dans une autre connexion, qui crée la clé HMAC) fait échouer l'`upsert` Prisma
+ * (désinscription : `update: {}` vide, upsert exécuté côté client, SELECT puis INSERT, donc exposé à la course ; effacement : `update` non vide, qui ne collisionne pas dans le scénario
+ * déterministe de tests/pg-suppression-race.test.ts, la reprise y est une précaution). PostgreSQL invalide alors la transaction : elle n'est JAMAIS
+ * poursuivie après l'erreur, elle est REPRISE EN ENTIER (Prisma l'a déjà annulée) et le nouvel essai retrouve la ligne créée entre-temps. Mêmes limites que les autres reprises
+ * (`TX_MAX_RETRIES`, attente 100–400 ms) ; une `P2002` persistante est relancée, jamais transformée en succès. Aucune autre contrainte d'unicité (hors clés primaires générées)
+ * n'est écrite par ces deux transactions.
+ */
+const SUPPRESSION_TX_CODES = [...TX_RETRY_CODES, "P2002"] as const;
+
+/**
  * Désinscription : UNE transaction (ordre FollowUp → Lead → données dérivées) — révocation de toutes les relances (y compris celles en cours : leur jeton est effacé),
  * retrait du consentement, liste de suppression, trace. Rejouable : un second appel répare une désinscription interrompue (liste de suppression, relances).
  */
@@ -386,7 +397,7 @@ export async function unsubscribeLead(workspaceId: string, leadId: string, sourc
       if (first) await tx.consent.create({ data: { workspaceId, leadId: lead.id, email, type: "marketing", granted: false, source } });
     }
     if (first) await tx.leadActivity.create({ data: { workspaceId, leadId: lead.id, type: "unsubscribed", data: { source } } });
-  });
+  }, { codes: SUPPRESSION_TX_CODES }); // reprise complète sur collision avec une création concurrente de l'entrée de suppression
   return true;
 }
 
@@ -455,7 +466,7 @@ export async function eraseLead(workspaceId: string, leadId: string, actorId?: s
     await tx.followUp.updateMany({ where: { workspaceId, leadId, result: { not: null } }, data: { result: "Résultat effacé (prospect effacé)." } });
     await eraseHook?.("beforeCommit");
     return customerDone;
-  });
+  }, { codes: SUPPRESSION_TX_CODES }); // reprise complète sur collision avec une création concurrente de l'entrée de suppression
   for (const e of inFlight) await audit({ workspaceId, userId: actorId, action: "email.in_flight_at_revocation", entity: "EmailLog", entityId: e.id, meta: { followUpId: e.followUpId } });
   await audit({ workspaceId, userId: actorId, action: "lead.erased", entity: "Lead", entityId: leadId, meta: { customerAnonymized, consentProofKept: KEEP_CONSENT_PROOF_AT_ERASURE } });
   return true;

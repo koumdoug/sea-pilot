@@ -127,9 +127,11 @@ const isUniqueViolation = (e: unknown) => (e as { code?: string } | null)?.code 
  *  2. `dryRun: false` : AJOUTE l'entrée HMAC à côté de l'entrée en clair (additif, réversible : rien n'est supprimé) ;
  *  3. `deletePlain: true` (avec `dryRun: false`) : supprime l'entrée en clair SEULEMENT si l'entrée HMAC est (a) lue en base APRÈS sa validation et (b) exploitable : la
  *     clé qui l'a produite figure toujours dans la configuration courante, donc la recherche d'envoi la retrouvera. Sinon le clair est conservé et compté (`keptUnverified`).
- * Ordre garanti dans un même appel : écriture validée (instruction autonome, attendue) → relecture → contrôle d'exploitabilité → suppression. Concurrence : une création
- * simultanée de la même entrée (autre backfill, désinscription, effacement) est une course de contrainte d'unicité sans conséquence (l'entrée existe, elle est relue) ;
- * une suppression simultanée du clair ne provoque aucune erreur (`deleteMany`). Un arrêt entre deux étapes laisse clair ET HMAC : l'adresse reste bloquée, la reprise termine.
+ * Ordre garanti dans un même appel : écriture validée (instruction autonome, attendue) → relecture → contrôle d'exploitabilité → suppression. Concurrence : le backfill gère SA PROPRE collision
+ * (création autonome, `P2002` rattrapée : l'entrée existe, elle est relue). L'inverse n'est PAS sans conséquence : la DÉSINSCRIPTION concurrente écrit la même clé par un `upsert` à
+ * `update: {}` DANS une transaction ; c'est la collision observée (tests/pg-suppression-race.test.ts) : elle fait échouer l'`upsert` et invalide la transaction PostgreSQL, qui est alors
+ * REPRISE EN ENTIER (`SUPPRESSION_TX_CODES`, leads.ts), jamais poursuivie. L'effacement (`update` non vide) ne collisionne pas dans ce scénario ; il bénéficie de la même reprise par précaution.
+ * Côté backfill : une suppression simultanée du clair ne provoque aucune erreur (`deleteMany`). Un arrêt entre deux étapes laisse clair ET HMAC : l'adresse reste bloquée, la reprise termine.
  * Le retour arrière n'est plus possible pour une adresse dont le prospect a été effacé (le HMAC n'est pas réversible) ; il l'est tant que la fiche conserve l'adresse.
  * Les entrées `erased:` ne peuvent PAS être converties : l'adresse n'est plus connue, elles restent valides telles quelles. Aucune adresse n'est journalisée (comptages seuls).
  */

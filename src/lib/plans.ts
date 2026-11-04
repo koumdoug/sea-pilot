@@ -123,7 +123,7 @@ export const RENEWAL_GRACE_MS = 3 * DAY;
  *  - trialing : accès jusqu'à trialEndsAt (ensuite « essai expiré », accès bloqué hors Billing)
  *  - active : accès ; si cancelAtPeriodEnd, accès jusqu'à currentPeriodEnd exactement ; sinon accès tant que la période payée n'est pas échue depuis plus de RENEWAL_GRACE_MS
  *    (délai de confirmation du renouvellement : au-delà, seule une réconciliation avec Stripe peut rétablir l'accès — jamais d'accès illimité sur un statut local ancien)
- *  - past_due : accès conservé (délai de grâce de 7 jours après la fin de période)
+ *  - past_due : accès conservé (délai de grâce de 7 jours après la fin de période) ; SANS date de fin de période la grâce ne peut pas être datée : accès suspendu (jamais de grâce renouvelée à chaque appel)
  *  - unpaid : accès SUSPENDU immédiatement (tous les essais de prélèvement ont échoué, ou abonnement en pause faute de moyen de paiement) ; l'abonnement reste géré
  *    (portail de paiement, résiliation) pour que le client puisse régulariser ; il reprend à la confirmation du paiement par Stripe
  *  - canceled / expired / incomplete : accès bloqué
@@ -151,7 +151,9 @@ export function entitlement(sub: SubscriptionLike | null, now = new Date()): Ent
     return { active: true, state: "paid", plan, daysLeft: left(sub.currentPeriodEnd) };
   }
   if (status === "past_due") {
-    const grace = sub.currentPeriodEnd ? sub.currentPeriodEnd.getTime() + 7 * DAY : now.getTime() + DAY;
+    // Sans date de fin de période, la grâce ne peut pas être datée : elle ne doit jamais être recalculée à chaque appel (accès indéfini). Accès suspendu ; l'abonnement reste géré (portail, résiliation).
+    if (!sub.currentPeriodEnd) return { active: false, state: "past_due", plan, daysLeft: 0, reason: "Paiement en échec et date de fin de période inconnue : accès suspendu. Régularisez votre moyen de paiement (Moyen de paiement et factures) ou résiliez." };
+    const grace = sub.currentPeriodEnd.getTime() + 7 * DAY;
     return grace > now.getTime() ? { active: true, state: "past_due", plan, daysLeft: null, reason: "Paiement en échec : mettez à jour votre moyen de paiement." } : { active: false, state: "past_due", plan, daysLeft: 0, reason: "Paiement en échec : accès suspendu." };
   }
   if (status === "unpaid") return { active: false, state: "past_due", plan, daysLeft: 0, reason: "Paiement impayé : tous les essais de prélèvement ont échoué et l'accès est suspendu. Régularisez votre moyen de paiement (Moyen de paiement et factures) ou résiliez." };

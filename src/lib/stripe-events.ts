@@ -4,12 +4,17 @@ import { db } from "./db";
 /**
  * Registre des événements Stripe : la clé primaire (identifiant d'événement Stripe) rend la prise en charge ATOMIQUE, quel que soit le nombre de serveurs.
  *  - processing : réservé par un exécuteur, pour la durée du bail ;
- *  - processed  : effets appliqués et validés (jamais repris) ;
+ *  - processed  : effets appliqués et validés (jamais repris), SAUF un `needs_review` « prix inconnu » (UNKNOWN_PRICE_NOTE) : rien n'y a été appliqué, un renvoi
+ *                 volontaire de l'événement (tableau de bord Stripe) après correction de la configuration le traite à nouveau, au plus une fois par UNKNOWN_PRICE_RETRY_MS (condition atomique) ;
  *  - failed     : traitement interrompu par une erreur (repris à la prochaine livraison de Stripe, qui réessaie sur erreur HTTP).
  * Un événement `processing` dont le bail a expiré (serveur interrompu en cours de traitement) est repris de la même façon.
  * Une écriture impossible dans ce registre fait échouer la requête AVANT tout effet : Stripe réessaiera.
  */
 export const EVENT_LEASE_MS = 120_000;
+/** Préfixe de la note d'un événement dont le prix Stripe n'est pas reconnu : seul cas où un événement `processed` est repris (rien n'avait été appliqué). */
+export const UNKNOWN_PRICE_NOTE = "unknown_price:";
+/** Délai minimal entre deux traitements d'un même événement « prix inconnu » : un renvoi plus rapide reste un doublon (aucune lecture Stripe ni écriture). */
+export const UNKNOWN_PRICE_RETRY_MS = 5 * 60_000;
 
 export type EventClaim = { kind: "claimed" } | { kind: "duplicate"; state: "processed" | "processing" };
 
@@ -25,7 +30,7 @@ export async function claimStripeEvent(id: string, type: string, now = new Date(
   }
   // L'événement existe déjà : seule une reprise conditionnelle (une seule requête SQL) peut le réserver à nouveau.
   const taken = await db.stripeEvent.updateMany({
-    where: { id, OR: [{ status: "failed" }, { status: "processing", lockedUntil: { lt: now } }] },
+    where: { id, OR: [{ status: "failed" }, { status: "processing", lockedUntil: { lt: now } }, { status: "processed", outcome: "needs_review", note: { startsWith: UNKNOWN_PRICE_NOTE }, processedAt: { lt: new Date(now.getTime() - UNKNOWN_PRICE_RETRY_MS) } }] },
     data: { status: "processing", lockedUntil, attempts: { increment: 1 }, error: null },
   });
   if (taken.count === 1) return { kind: "claimed" };

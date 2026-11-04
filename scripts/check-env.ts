@@ -19,5 +19,8 @@ const rows: [string, boolean, string][] = [
   ["TIKTOK_APP_ID/SECRET", has("TIKTOK_APP_ID") && has("TIKTOK_APP_SECRET"), "TikTok Ads"],
 ];
 for (const [name, ok, use] of rows) console.log(`${ok ? "✅" : "⚠️ "} ${name.padEnd(46)} ${ok ? "configuré" : "absent"}  (${use})`);
+// Prix historiques (optionnels) : chaque identifiant doit avoir le format price_… (aucune valeur n'est affichée).
+const badLegacy = ["STARTER", "GROWTH", "PRO"].filter((p) => (process.env[`STRIPE_PRICE_${p}_LEGACY`] ?? "").split(",").map((x) => x.trim()).filter(Boolean).some((x) => !/^price_\S+$/.test(x)));
+if (badLegacy.length) console.log(`⚠️  ${badLegacy.map((p) => `STRIPE_PRICE_${p}_LEGACY`).join(", ")} : identifiant au format inattendu (price_…)  (prix historiques)`);
 const missingRequired = rows.slice(0, 3).some(([, ok]) => !ok);
 if (missingRequired) { console.error("\nVariables obligatoires manquantes."); process.exit(1); }

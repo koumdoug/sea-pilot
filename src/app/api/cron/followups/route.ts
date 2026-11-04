@@ -4,7 +4,7 @@ import { processDueFollowUps, type ProcessSummary } from "@/lib/followups";
 import { reconcileAcceptedReviews } from "@/lib/followup-review";
 import { listSyncableIntegrations, syncIntegration } from "@/lib/integrations/service";
 import { log, errMsg } from "@/lib/logger";
-import { reconcileDueSubscriptions, stripeConfigured, type ReconcileSummary } from "@/lib/billing";
+import { countStripeLinkedSubscriptions, reconcileDueSubscriptions, stripeConfigured, type ReconcileSummary } from "@/lib/billing";
 import { purgeStripeEvents } from "@/lib/stripe-events";
 
 export const dynamic = "force-dynamic";
@@ -65,20 +65,35 @@ async function handle(req: Request) {
   }
 
   // Réconciliation des abonnements payants avec Stripe (événements perdus) : une panne de Stripe n'empêche pas le reste de la tâche et ne modifie aucun droit.
-  let billing: ReconcileSummary | { skipped: true; reason: string } = { skipped: true, reason: url.searchParams.get("reconcile") === "0" ? "désactivée par paramètre" : "Stripe non configuré" };
-  if (url.searchParams.get("reconcile") !== "0" && stripeConfigured()) {
+  // Étapes volontairement désactivées par paramètre, dans un ordre fixe. Distinct de `syncSkipped` (intégrations écartées par le forfait ou la limite).
+  const disabledStages = (["sync", "reconcile", "purge"] as const).filter((k) => url.searchParams.get(k) === "0");
+  const reconcileDisabled = disabledStages.includes("reconcile"); // désactivation VOLONTAIRE : la tâche n'est pas complète (≠ Stripe non configuré : réconciliation sans objet) ; elle garde la priorité sur le contrôle ci-dessous
+  let billing: ReconcileSummary | { skipped: true; reason: string; linkedSubscriptions?: number | null } = { skipped: true, reason: reconcileDisabled ? "désactivée par paramètre" : "Stripe non configuré" };
+  // Stripe absent : mode essai (aucun abonnement lié) = sans objet, `complete` inchangé. Des abonnements liés à Stripe sans clé = configuration probablement accidentelle : incomplet.
+  // Si le contrôle lui-même échoue, jamais de succès affiché : `linkedSubscriptions: null` (inconnu) et incomplet. Aucune requête quand Stripe est configuré ou que `reconcile=0`.
+  let stripeAbsentIncomplete = false;
+  if (!reconcileDisabled && !stripeConfigured()) {
+    try {
+      const linked = await countStripeLinkedSubscriptions();
+      if (linked > 0) { stripeAbsentIncomplete = true; billing = { skipped: true, reason: "Stripe non configuré", linkedSubscriptions: linked }; log.error("cron.stripe_not_configured_with_subscriptions", { count: linked }); }
+    } catch (e) {
+      stripeAbsentIncomplete = true; billing = { skipped: true, reason: "Stripe non configuré", linkedSubscriptions: null };
+      log.error("cron.stripe_not_configured_check_failed", { error: errMsg(e) });
+    }
+  }
+  if (!reconcileDisabled && stripeConfigured()) {
     const budgetMs = Math.min(CRON_RECONCILE_BUDGET_MS, CRON_BUDGET_MS - (Date.now() - startedAt));
     try { billing = await reconcileDueSubscriptions({ budgetMs }); }
-    catch (e) { log.error("cron.reconcile_failed", { error: errMsg(e) }); billing = { checked: 0, updated: 0, failed: 1, busy: 0, deferred: 0, remaining: 0, complete: false, stoppedBy: null }; }
+    catch (e) { log.error("cron.reconcile_failed", { error: errMsg(e) }); billing = { checked: 0, updated: 0, failed: 1, busy: 0, needsReview: 0, unknownPrice: 0, openPriceReviews: null, unlinkedPriceReviews: null, reviewCountersAvailable: false, deferred: 0, remaining: 0, complete: false, stoppedBy: null }; }
   }
   // Purge du registre des événements Stripe (rétention 90 jours, jamais d'événement en cours) ; une erreur de purge n'affecte rien d'autre.
   let ledgerPurged: { processed: number; failed: number } | { skipped: true } = { skipped: true };
   if (url.searchParams.get("purge") !== "0") { try { ledgerPurged = await purgeStripeEvents(); } catch (e) { log.warn("cron.ledger_purge_failed", { error: errMsg(e) }); } }
 
   const followupsComplete = !("crashed" in followups) && followups.deferred === 0;
-  const complete = followupsComplete && syncs.deferred === 0 && !syncs.planFailed && ("skipped" in billing || billing.complete);
-  log.info("cron.summary", { complete, followups, syncs, billing, elapsedMs: Date.now() - startedAt });
-  return Response.json({ followups, syncs: syncs.ok + syncs.errors, syncErrors: syncs.errors, syncSkipped: { inactive: syncs.skippedInactive, overLimit: syncs.skippedOverLimit }, syncDeferred: syncs.deferred, syncPlanFailed: syncs.planFailed, billing, ledgerPurged, complete });
+  const complete = followupsComplete && syncs.deferred === 0 && !syncs.planFailed && !reconcileDisabled && !stripeAbsentIncomplete && ("skipped" in billing || billing.complete);
+  log.info("cron.summary", { complete, disabledStages, followups, syncs, billing, elapsedMs: Date.now() - startedAt });
+  return Response.json({ followups, syncs: syncs.ok + syncs.errors, syncErrors: syncs.errors, syncSkipped: { inactive: syncs.skippedInactive, overLimit: syncs.skippedOverLimit }, syncDeferred: syncs.deferred, syncPlanFailed: syncs.planFailed, billing, ledgerPurged, disabledStages, complete });
 }
 
 export const GET = handle;

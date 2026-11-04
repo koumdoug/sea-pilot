@@ -46,7 +46,7 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
     <>
       <PageHeader title="Facturation" subtitle="Forfait, essai, abonnement et usage de votre espace." />
       {sp.blocked && !e.active && <div className="mb-4"><Alert tone="warning" title="Accès suspendu">{e.reason ?? "Votre abonnement n'est plus actif."} Les leads reçus par vos pages publiques continuent d'être enregistrés ; vous y accéderez dès la réactivation.</Alert></div>}
-      {review && <div className="mb-4"><Alert tone="warning" title="Vérification de facturation en cours">Plusieurs abonnements, ou un client Stripe inattendu, ont été détectés pour votre espace. Aucune action automatique n'a été prise et votre abonnement actuel est conservé. Contactez le support pour régulariser.</Alert></div>}
+      {review && <div className="mb-4"><Alert tone="warning" title="Vérification de facturation en cours">Plusieurs abonnements, un client Stripe inattendu ou un prix d'abonnement non reconnu ont été détectés pour votre espace. Votre abonnement est en cours de vérification : aucune modification automatique n'a été appliquée à votre forfait ni à vos droits, et ils ne sont pas garantis avant la fin de cette vérification. Contactez le support pour régulariser.</Alert></div>}
       {sp.success && <div className="mb-4"><Alert tone="success">Paiement transmis. Votre forfait ne change qu'à la confirmation de Stripe, en quelques secondes : actualisez la page si besoin.</Alert></div>}
       {sp.canceled && <div className="mb-4"><Alert tone="info">Paiement annulé : aucun prélèvement n'a été effectué et votre forfait n'a pas changé.</Alert></div>}
 

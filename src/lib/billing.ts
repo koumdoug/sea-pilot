@@ -7,11 +7,13 @@ import { audit } from "./audit";
 import { PLAN_IDS, type PlanId } from "./constants";
 import { PLANS, comparePlans, downgradeBlockers, entitlement, isLiveSubscription, planOrNull, type PlanLimits } from "./plans";
 import { log, errMsg } from "./logger";
-import { claimStripeEvent, completeStripeEvent, failStripeEvent } from "./stripe-events";
+import { UNKNOWN_PRICE_NOTE, claimStripeEvent, completeStripeEvent, failStripeEvent } from "./stripe-events";
 
 export class BillingError extends Error {}
 
 export const stripeConfigured = () => !!env.stripeSecret;
+/** Abonnements localement liés à Stripe (identifiant d'abonnement non nul) : 0 = mode essai sans Stripe ; > 0 sans clé Stripe = configuration probablement accidentelle (utilisé par la tâche planifiée). */
+export const countStripeLinkedSubscriptions = () => db.subscription.count({ where: { stripeSubscriptionId: { not: null } } });
 export const planPriceId = (plan: string) => env.stripePriceId(plan);
 
 /** Événements Stripe à déclarer sur le point de terminaison /api/stripe/webhook (les droits payants ne sont accordés que par eux). */
@@ -43,13 +45,18 @@ export function stripeSetup(): StripeSetup {
   if (hookSet && !hook) issues.push("STRIPE_WEBHOOK_SECRET est définie mais son format est inattendu (un secret de webhook commence par whsec_).");
   for (const id of PLAN_IDS) if (prices[id] && !priceValid(id)) issues.push(`STRIPE_PRICE_${id.toUpperCase()} est définie mais son format est inattendu (un identifiant de prix commence par price_).`);
   for (const id of PLAN_IDS) for (const other of PLAN_IDS) if (id < other && prices[id] && prices[id] === prices[other]) issues.push(`Les forfaits ${PLANS[id].name} et ${PLANS[other].name} utilisent le même prix Stripe (STRIPE_PRICE_${id.toUpperCase()} et STRIPE_PRICE_${other.toUpperCase()}) : le forfait ne pourrait pas être reconnu.`);
+  for (const id of PLAN_IDS) for (const legacy of env.stripeLegacyPriceIds(id)) {
+    if (!FORMAT.price.test(legacy)) issues.push(`STRIPE_PRICE_${id.toUpperCase()}_LEGACY contient un identifiant au format inattendu (un identifiant de prix commence par price_).`);
+    else if (priceOwners(legacy).length > 1) issues.push(`Le prix historique ${legacy} (STRIPE_PRICE_${id.toUpperCase()}_LEGACY) est associé à plusieurs forfaits : il est ambigu et ne sera jamais reconnu.`);
+  }
   if (secret && !hookSet) issues.push("STRIPE_WEBHOOK_SECRET manque : un paiement ne serait jamais confirmé, donc le forfait ne changerait pas. La souscription reste désactivée.");
-  const duplicated = new Set(PLAN_IDS.filter((id) => prices[id] && PLAN_IDS.some((o) => o !== id && prices[o] === prices[id])));
+  const duplicated = new Set(PLAN_IDS.filter((id) => prices[id] && priceOwners(prices[id]).length > 1)); // un prix actuel partagé avec un autre forfait (actuel OU historique) ne serait jamais reconnu : forfait non souscriptible
   const ready = Object.fromEntries(PLAN_IDS.map((id) => [id, secret && hook && priceValid(id) && !duplicated.has(id)])) as Record<PlanId, boolean>;
   return {
     variables: [
       { name: "STRIPE_SECRET_KEY", set: secretSet, valid: secret },
       ...PLAN_IDS.map((id) => ({ name: `STRIPE_PRICE_${id.toUpperCase()}`, set: !!prices[id], valid: priceValid(id) })),
+      ...PLAN_IDS.filter((id) => env.stripeLegacyPriceIds(id).length).map((id) => ({ name: `STRIPE_PRICE_${id.toUpperCase()}_LEGACY`, set: true, valid: env.stripeLegacyPriceIds(id).every((x) => FORMAT.price.test(x) && priceOwners(x).length === 1) })),
       { name: "STRIPE_WEBHOOK_SECRET", set: hookSet, valid: hook },
     ],
     issues, ready, anyReady: PLAN_IDS.some((id) => ready[id]),
@@ -100,14 +107,37 @@ export interface StripeGateway {
  */
 export const customerIdempotencyKey = (workspaceId: string, email: string) => `customer:${workspaceId}:${sha256(email.trim().toLowerCase()).slice(0, 12)}`;
 
-/** Une revue manuelle de facturation est-elle ouverte (30 jours) : second abonnement actif ou client Stripe inattendu détecté, aucune action automatique prise ? */
+/**
+ * Prix Stripe inconnu : une revue reste OUVERTE jusqu'à sa résolution, sans limite de durée (un abonnement dont le prix n'est pas reconnu ne se résout pas avec le temps).
+ * Piste d'audit : `billing.unknown_price` (détection ; une seule trace par abonnement et par prix tant que l'épisode est ouvert) puis `billing.unknown_price_resolved`
+ * (écrit dès qu'une synchronisation lit un prix RECONNU — quel que soit le statut de l'abonnement — ou que l'abonnement est terminé : résilié, expiré). Clore la revue n'accorde aucun accès :
+ * le forfait ne change que pour un statut payant et le statut réel est conservé. Écrire `stripeSyncedAt` ne résout rien. La dernière entrée de l'espace décide : ouverte si c'est une détection.
+ */
+export const UNKNOWN_PRICE_ACTION = "billing.unknown_price";
+export const UNKNOWN_PRICE_RESOLVED_ACTION = "billing.unknown_price_resolved";
+// Préfixe de la note du registre StripeEvent (défini dans stripe-events.ts) : distingue ces revues (suivies par la piste d'audit ci-dessus) des autres `needs_review`, qui restent comptées 30 jours.
+export { UNKNOWN_PRICE_NOTE };
+
+const latestPriceReview = (workspaceId: string) =>
+  db.auditLog.findFirst({ where: { workspaceId, action: { in: [UNKNOWN_PRICE_ACTION, UNKNOWN_PRICE_RESOLVED_ACTION] } }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], select: { action: true, meta: true } });
+
+async function closePriceReview(workspaceId: string, subscriptionId: string, status: string, source: string) {
+  const last = await latestPriceReview(workspaceId);
+  if (last?.action === UNKNOWN_PRICE_ACTION) await audit({ workspaceId, action: UNKNOWN_PRICE_RESOLVED_ACTION, meta: { source, subscriptionId, status } });
+}
+
+/**
+ * Une revue manuelle de facturation est-elle ouverte : second abonnement actif ou client Stripe inattendu détecté (30 jours), ou prix Stripe inconnu non résolu (sans limite) ?
+ * Aucune action automatique n'est prise dans ces cas.
+ */
 export async function billingNeedsReview(workspaceId: string, now = new Date()): Promise<boolean> {
   const since = new Date(now.getTime() - 30 * 86_400_000);
-  const [audits, events] = await Promise.all([
+  const [audits, events, price] = await Promise.all([
     db.auditLog.count({ where: { workspaceId, action: "billing.duplicate_subscription", createdAt: { gte: since } } }),
-    db.stripeEvent.count({ where: { workspaceId, outcome: "needs_review", processedAt: { gte: since } } }),
+    db.stripeEvent.count({ where: { workspaceId, outcome: "needs_review", processedAt: { gte: since }, OR: [{ note: null }, { NOT: { note: { startsWith: UNKNOWN_PRICE_NOTE } } }] } }),
+    latestPriceReview(workspaceId),
   ]);
-  return audits + events > 0;
+  return audits + events > 0 || price?.action === UNKNOWN_PRICE_ACTION;
 }
 
 const isNotFound = (e: unknown) => e instanceof StripeHttpError && e.status === 404;
@@ -363,9 +393,16 @@ export function verifyStripeSignature(payload: string, header: string | null, se
   return v1.some((s) => safeEqual(s, expected));
 }
 
+/** Forfaits auxquels la configuration associe explicitement ce prix : prix actuel (STRIPE_PRICE_<FORFAIT>) ou prix historique (STRIPE_PRICE_<FORFAIT>_LEGACY). */
+function priceOwners(priceId: string): string[] {
+  return PLAN_IDS.filter((p) => env.stripePriceId(p) === priceId || env.stripeLegacyPriceIds(p).includes(priceId));
+}
+
+/** Reconnaissance STRICTE : uniquement une association explicite et non ambiguë. Un prix absent, inconnu, ou associé à plusieurs forfaits n'attribue jamais de forfait. */
 export function planFromPriceId(priceId: string | undefined): string | null {
   if (!priceId) return null;
-  return PLAN_IDS.find((p) => env.stripePriceId(p) === priceId) ?? null;
+  const owners = priceOwners(priceId);
+  return owners.length === 1 ? owners[0] : null;
 }
 
 /**
@@ -387,10 +424,12 @@ async function findSubscription(s: { customer?: string; workspaceId?: string; su
 /** Statuts locaux pour lesquels un abonnement payant existe réellement (droits du plan acquis). */
 const PAID_STATUSES = ["active", "past_due", "unpaid"];
 
-export type SyncOutcome = { outcome: "handled" | "ignored" | "needs_review"; note?: string; workspaceId: string };
+export type SyncOutcome = { outcome: "handled" | "ignored" | "needs_review"; note?: string; workspaceId: string; /** Cause d'un `needs_review` que la réconciliation périodique doit pouvoir compter. */ reason?: "unknown_price" };
 
 /** Une synchronisation de cet abonnement est déjà en cours ailleurs (bail non expiré) : réessayer plus tard, rien n'est modifié. */
 export class SyncBusyError extends BillingError {}
+/** Écriture locale de la revue « prix inconnu » (date de lecture + trace d'audit) impossible : erreur de BASE, pas de Stripe. Annule la transaction ; l'événement échoue (Stripe réessaie) ou le cron compte un échec sans alimenter son disjoncteur « Stripe indisponible ». */
+export class ReviewTraceError extends BillingError {}
 
 /**
  * Bail d'exclusion des synchronisations (lecture Stripe + écriture) d'UN abonnement, valable entre serveurs.
@@ -450,7 +489,35 @@ async function applyRemoteSubscription(subscriptionRowId: string, remote: Stripe
         }
       }
     }
-    const plan = entitled ? (planFromPriceId(remote.items?.data[0]?.price?.id) ?? remote.metadata?.plan ?? local.plan) : local.plan;
+    // Forfait : UNIQUEMENT d'après le prix Stripe reconnu (STRIPE_PRICE_<FORFAIT> ou prix historique STRIPE_PRICE_<FORFAIT>_LEGACY). Un prix absent ou inconnu n'attribue jamais de forfait — ni d'après
+    // `metadata.plan`, ni d'après le forfait local — et ne remplace aucun abonnement en place : revue humaine. Pour un statut payant (actif, essai, impayé en grâce) avec un prix inconnu, les SEULES écritures
+    // sont, dans une même transaction, `stripeSyncedAt` (date de lecture) et la trace d'audit qui ouvre la revue (voir plus bas) ; forfait, statut, période et identifiant d'abonnement ne changent pas.
+    // Les statuts non payants (résiliation, impayé…) ne passent pas par ce chemin : ils s'appliquent normalement, et la revue est close dès que le prix est reconnu (voir plus bas).
+    const remotePriceId = remote.items?.data[0]?.price?.id;
+    const pricedPlan = planFromPriceId(remotePriceId);
+    if (entitled && !pricedPlan) {
+      const last = await latestPriceReview(workspaceId);
+      const seen = (last?.meta ?? {}) as { subscriptionId?: string; price?: string | null };
+      const alreadyTraced = last?.action === UNKNOWN_PRICE_ACTION && seen.subscriptionId === remote.id && (seen.price ?? null) === (remotePriceId ?? null);
+      // Seules écritures, DANS UNE MÊME TRANSACTION : la date de dernière LECTURE (`stripeSyncedAt`, jamais une preuve de résolution) ET la trace d'audit qui ouvre la revue.
+      // Ce n'est PAS le `audit()` d'usage (qui avale ses erreurs) : une erreur d'écriture fait échouer la transaction ENTIÈRE, donc rien n'est enregistré (l'abonnement reste candidat à la
+      // réconciliation) et l'erreur remonte : l'événement passe en `failed` et Stripe réessaie, le cron compte un échec. Un abonnement n'est jamais « lu » sans que la revue soit tracée.
+      // Identifiant d'abonnement, forfait, statut, période, client et réservation restent intacts. Le réessai est idempotent : la trace n'est écrite qu'une fois par abonnement et par prix.
+      const marked = await db.$transaction(async (tx) => {
+        const m = await tx.subscription.updateMany({ where: { id: local.id, stripeSyncLeaseId: lease }, data: { stripeSyncedAt: now } });
+        if (m.count === 0) return false; // bail perdu : rendu « obsolète » en tête de boucle, rien n'est tracé
+        if (!alreadyTraced) await tx.auditLog.create({ data: { workspaceId, action: UNKNOWN_PRICE_ACTION, entity: "Subscription", entityId: local.id, meta: { source, subscriptionId: remote.id, status: mapped, price: remotePriceId ?? null } } });
+        return true;
+      }).catch((e) => {
+        // Véritable erreur d'écriture : l'incident (prix inconnu) est journalisé ICI avec sa cause, puis l'erreur remonte (jamais masquée).
+        log.error("billing.unknown_price", { workspaceId, subscriptionId: remote.id, priceId: remotePriceId ?? null, source, traceWriteFailed: true, error: errMsg(e) });
+        throw new ReviewTraceError(`Écriture de la revue « prix inconnu » impossible (transaction annulée) : ${errMsg(e)}`);
+      });
+      if (!marked) continue; // bail perdu : aucun incident n'est journalisé (la synchronisation est obsolète, une autre la reprend)
+      log.error("billing.unknown_price", { workspaceId, subscriptionId: remote.id, priceId: remotePriceId ?? null, source }); // détection validée (bail tenu, trace écrite ou déjà présente)
+      return { outcome: "needs_review", reason: "unknown_price", workspaceId, note: `${UNKNOWN_PRICE_NOTE} prix Stripe absent ou non reconnu (abonnement ${remote.id}, prix ${remotePriceId ?? "absent"}) : aucun forfait attribué, état local inchangé. Associer ce prix à un forfait (STRIPE_PRICE_<FORFAIT> ou STRIPE_PRICE_<FORFAIT>_LEGACY), puis relancer la réconciliation.` };
+    }
+    const plan = entitled ? (pricedPlan as string) : local.plan;
     const periodEnd = remote.current_period_end ?? remote.items?.data[0]?.current_period_end;
     // Paiement non abouti (incomplete / expired) : ni forfait, ni statut ne changent si un essai valide est en cours ; sinon seul le statut est enregistré.
     const localTrialValid = local.status === "trialing" && !!local.trialEndsAt && local.trialEndsAt.getTime() > now.getTime();
@@ -467,6 +534,9 @@ async function applyRemoteSubscription(subscriptionRowId: string, remote: Stripe
     };
     const written = await db.subscription.updateMany({ where: { id: local.id, updatedAt: local.updatedAt, stripeSyncLeaseId: lease }, data });
     if (written.count === 0) continue; // modifié entre la lecture et l'écriture : on relit l'état local et on recalcule (le bail est revérifié en tête de boucle)
+    // Revue « prix inconnu » close dès que le prix est RECONNU (quel que soit le statut : impayé, en pause…) ou que l'abonnement est terminé. Clore une revue n'accorde aucun accès :
+    // le forfait ne change que pour un statut payant (voir `plan` ci-dessus) et le statut réel est conservé.
+    if (pricedPlan || mapped === "canceled" || mapped === "expired") await closePriceReview(workspaceId, remote.id, mapped, source);
     const time = (d: Date | null) => d?.getTime() ?? null;
     const unchanged = local.stripeSubscriptionId === data.stripeSubscriptionId && local.stripeCustomerId === data.stripeCustomerId && local.plan === data.plan && local.status === data.status
       && time(local.currentPeriodEnd) === time(data.currentPeriodEnd) && local.cancelAtPeriodEnd === data.cancelAtPeriodEnd && time(local.canceledAt) === time(data.canceledAt) && time(local.trialEndsAt) === time(data.trialEndsAt)
@@ -517,8 +587,33 @@ function reconcileWhere(now: Date, extra?: Record<string, unknown>) {
   };
 }
 
+/**
+ * Revues « prix inconnu » ENCORE OUVERTES, par espace (liés ou non), d'après la source d'audit qui fait autorité (la même que `billingNeedsReview`) : un espace est ouvert quand sa DERNIÈRE
+ * entrée « prix » est une détection. Un espace compte une fois, quel que soit le nombre de détections. `unlinked` est le sous-ensemble dont l'abonnement n'a aucun identifiant Stripe local.
+ */
+async function countPriceReviews(): Promise<{ open: number; unlinked: number }> {
+  const rows = await db.auditLog.findMany({
+    where: { action: { in: [UNKNOWN_PRICE_ACTION, UNKNOWN_PRICE_RESOLVED_ACTION] }, workspaceId: { not: null } },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }], select: { workspaceId: true, action: true, workspace: { select: { subscription: { select: { stripeSubscriptionId: true } } } } },
+  });
+  const latest = new Map<string, { action: string; linked: boolean }>();
+  for (const r of rows) if (r.workspaceId && !latest.has(r.workspaceId)) latest.set(r.workspaceId, { action: r.action, linked: !!r.workspace?.subscription?.stripeSubscriptionId });
+  const open = [...latest.values()].filter((v) => v.action === UNKNOWN_PRICE_ACTION);
+  return { open: open.length, unlinked: open.filter((v) => !v.linked).length };
+}
+
 export type ReconcileSummary = {
   checked: number; updated: number; failed: number;
+  /** Abonnements dont la synchronisation demande une revue humaine (client inattendu, doublon, prix inconnu). Une détection n'est jamais une correction. */
+  needsReview: number;
+  /** Dont : détections « prix inconnu » de CE passage (abonnements liés relus pendant ce passage uniquement ; une revue ouverte non relue n'y figure pas : voir `openPriceReviews`). */
+  unknownPrice: number;
+  /** Revues « prix inconnu » ENCORE OUVERTES (espaces liés ou non, état durable : la dernière entrée d'audit de l'espace est une détection). Indépendant du passage : une revue reste comptée jusqu'à sa résolution, qu'elle soit relue ou non. */
+  openPriceReviews: number | null;
+  /** Sous-ensemble de `openPriceReviews` : espaces dont l'abonnement n'est lié à aucun identifiant Stripe local (jamais lus par le cron, qui ne sélectionne que les abonnements liés). Non additif avec `openPriceReviews`. */
+  unlinkedPriceReviews: number | null;
+  /** Faux quand le calcul des revues ouvertes a échoué : `openPriceReviews` et `unlinkedPriceReviews` valent alors `null` (inconnus, jamais 0) et le passage n'est pas `complete`. */
+  reviewCountersAvailable: boolean;
   /** Abonnements dont la synchronisation était déjà en cours ailleurs (bail) : reprise au prochain passage. */
   busy: number;
   /** Candidats retenus mais NON traités à cause du budget de temps ou d'une indisponibilité de Stripe : reprise au prochain passage (leur état n'a pas changé). */
@@ -543,26 +638,32 @@ export type ReconcileSummary = {
 export async function reconcileDueSubscriptions(opts: { now?: Date; limit?: number; budgetMs?: number; itemReserveMs?: number; maxConsecutiveFailures?: number } = {}, gw: StripeGateway = gateway): Promise<ReconcileSummary> {
   const now = opts.now ?? new Date(), limit = opts.limit ?? 50, budget = opts.budgetMs ?? 90_000, reserve = opts.itemReserveMs ?? 30_000, maxFail = opts.maxConsecutiveFailures ?? 3;
   const startedAt = Date.now();
+  const configIssues = stripeSetup().issues; // aucune valeur secrète : seulement des noms de variables et des formats
+  if (configIssues.length) log.warn("billing.config_issues", { count: configIssues.length, issues: configIssues });
   const total = await db.subscription.count({ where: reconcileWhere(now) });
   const never = await db.subscription.findMany({ where: reconcileWhere(now, { stripeSyncedAt: null }), orderBy: { createdAt: "asc" }, take: limit });
   const rest = never.length < limit ? await db.subscription.findMany({ where: reconcileWhere(now, { stripeSyncedAt: { not: null } }), orderBy: { stripeSyncedAt: "asc" }, take: limit - never.length }) : [];
   const list = [...never, ...rest];
-  const sum = { checked: 0, updated: 0, failed: 0, busy: 0 };
+  const sum = { checked: 0, updated: 0, failed: 0, busy: 0, needsReview: 0, unknownPrice: 0 };
   let stoppedBy: ReconcileSummary["stoppedBy"] = null, consecutive = 0, i = 0;
   for (; i < list.length; i++) {
     if (Date.now() - startedAt + reserve > budget) { stoppedBy = "budget"; break; }
     if (consecutive >= maxFail) { stoppedBy = "stripe_unavailable"; break; }
     const s = list[i];
     sum.checked++;
-    try { const r = await syncFromStripe(s, s.stripeSubscriptionId!, gw, "reconcile", { missingIsCanceled: true, waitMs: 2_000 }); consecutive = 0; if (r.outcome === "handled") sum.updated++; }
+    try { const r = await syncFromStripe(s, s.stripeSubscriptionId!, gw, "reconcile", { missingIsCanceled: true, waitMs: 2_000 }); consecutive = 0; if (r.outcome === "handled") sum.updated++; if (r.outcome === "needs_review") { sum.needsReview++; if (r.reason === "unknown_price") sum.unknownPrice++; } }
     catch (e) {
       if (e instanceof SyncBusyError) sum.busy++;
+      else if (e instanceof ReviewTraceError) { sum.failed++; log.error("billing.reconcile_trace_failed", { workspaceId: s.workspaceId, error: errMsg(e) }); } // erreur de base : jamais comptée comme panne de Stripe (aucune lecture ni état modifié, l'abonnement reste candidat)
       else { sum.failed++; consecutive++; log.warn("billing.reconcile_failed", { workspaceId: s.workspaceId, error: errMsg(e) }); }
     }
   }
   const deferred = list.length - i, remaining = Math.max(0, total - sum.checked);
-  const complete = !stoppedBy && sum.failed === 0 && sum.busy === 0 && remaining === 0;
-  const out: ReconcileSummary = { ...sum, deferred, remaining, complete, stoppedBy };
+  // Après la boucle : inclut les détections de ce passage. Un échec du calcul ne fait pas perdre le compte rendu du passage : les compteurs durables sont alors INCONNUS (null), jamais 0.
+  let reviews: { open: number; unlinked: number } | null = null;
+  try { reviews = await countPriceReviews(); } catch (e) { log.error("billing.price_reviews_unavailable", { error: errMsg(e) }); }
+  const complete = !stoppedBy && sum.failed === 0 && sum.busy === 0 && reviews !== null && reviews.open === 0 && remaining === 0; // une revue de prix ouverte (relue ou non, liée ou non), ou un compteur indéterminé, interdit « complete »
+  const out: ReconcileSummary = { ...sum, deferred, remaining, openPriceReviews: reviews?.open ?? null, unlinkedPriceReviews: reviews?.unlinked ?? null, reviewCountersAvailable: reviews !== null, complete, stoppedBy };
   if (!complete) log.warn("billing.reconcile_incomplete", { ...out, budgetMs: budget, elapsedMs: Date.now() - startedAt });
   else if (sum.checked > 0) log.info("billing.reconcile_done", { ...out, elapsedMs: Date.now() - startedAt });
   return out;
@@ -615,7 +716,7 @@ async function processStripeEvent(ev: StripeEvent, gw: StripeGateway): Promise<{
 /**
  * Traitement des événements Stripe, seul chemin par lequel un forfait payant est attribué.
  *  - Prise en charge atomique par le registre `StripeEvent` (clé primaire = identifiant d'événement) : livraisons simultanées et rejeux ne produisent
- *    qu'un traitement ; un événement en échec ou interrompu (bail expiré) est repris ; un événement `processed` n'est jamais rejoué.
+ *    qu'un traitement ; un événement en échec ou interrompu (bail expiré) est repris ; un événement `processed` n'est jamais rejoué (seule exception : un `needs_review` « prix inconnu », où rien n'a été appliqué : un renvoi volontaire après correction de la configuration le reprend, au plus une fois par UNKNOWN_PRICE_RETRY_MS).
  *  - L'état appliqué est celui relu chez Stripe (voir applyRemoteSubscription), jamais le contenu de l'événement.
  *  - Toute erreur (Stripe indisponible, base) remonte : l'événement est marqué `failed` et Stripe réessaiera.
  */

@@ -53,6 +53,8 @@ export const env = {
   get stripeSecret() { return opt("STRIPE_SECRET_KEY"); },
   get stripeWebhookSecret() { return opt("STRIPE_WEBHOOK_SECRET"); },
   stripePriceId(plan: string) { return opt(`STRIPE_PRICE_${plan.toUpperCase()}`); },
+  /** Prix HISTORIQUES d'un forfait (anciens prix encore portés par des abonnements existants) : `STRIPE_PRICE_<FORFAIT>_LEGACY`, identifiants séparés par des virgules. Jamais utilisés pour créer un paiement. */
+  stripeLegacyPriceIds(plan: string): string[] { return (opt(`STRIPE_PRICE_${plan.toUpperCase()}_LEGACY`) ?? "").split(",").map((x) => x.trim()).filter(Boolean); },
   planPriceLabel(plan: string) { return opt(`PLAN_${plan.toUpperCase()}_PRICE_LABEL`); },
   // OAuth / intégrations
   get googleClientId() { return opt("GOOGLE_CLIENT_ID"); },

@@ -6,6 +6,7 @@ import { audit } from "../audit";
 import { slugify } from "../workspaces";
 import { DEFAULT_PRODUCTS } from "./catalog";
 import { UNKNOWN_KEY_REASON, suppressionStatus, suppressionWriteKey, type SuppressionStatus } from "../suppression";
+import { TX_RETRY_CODES, runTx } from "../followup-runtime";
 import {
   contactEligibility, dedupeKeyOf, domainOf, eventDedupeKey, normalizeEmail, EVENT_TYPES, LEGAL_BASES, OUTREACH_CHANNELS,
   type Eligibility, type ImportRow, type ProductEventType,
@@ -14,6 +15,14 @@ import {
 export class PortfolioError extends Error {}
 
 const ERASED_NAME = "Prospect effacé";
+
+/**
+ * Transactions qui créent une ligne à contrainte d'unicité pouvant être créée en même temps par un autre traitement (liste de suppression : clé HMAC du backfill, d'une désinscription ;
+ * intérêt produit). Codes de reprise habituels PLUS `P2002` : la collision invalide la transaction PostgreSQL, qui n'est JAMAIS poursuivie après l'erreur — elle est REPRISE EN ENTIER
+ * (déjà annulée par Prisma) et le nouvel essai retrouve la ligne créée entre-temps. Limites de `runTx` (2 reprises, attente 100–400 ms) ; une `P2002` persistante est relancée.
+ * Chaque écriture y est un `create` précédé d'une lecture (jamais un `upsert` à `update` vide, exécuté côté client donc exposé à la course) : la collision est alors l'unique chemin de reprise.
+ */
+const UNIQUE_RETRY_CODES = [...TX_RETRY_CODES, "P2002"] as const;
 
 const isUnique = (e: unknown) => typeof e === "object" && e !== null && (e as { code?: string }).code === "P2002";
 const json = (v: unknown) => v as Prisma.InputJsonValue;
@@ -162,22 +171,39 @@ export async function reassignProspect(p: { workspaceId: string; prospectId: str
   const pr = await db.prospect.findFirst({ where: { id: p.prospectId, workspaceId: p.workspaceId, deletedAt: null } });
   if (!pr) throw new PortfolioError("Prospect introuvable.");
   if (pr.productId === p.toProductId) return pr;
-  if (pr.productId) await db.prospectProduct.upsert({ where: { prospectId_productId: { prospectId: pr.id, productId: pr.productId } }, create: { workspaceId: p.workspaceId, prospectId: pr.id, productId: pr.productId, note: "Ancienne attribution" }, update: {} });
-  await db.prospectProduct.deleteMany({ where: { prospectId: pr.id, productId: p.toProductId } });
-  const u = await db.prospect.update({ where: { id: pr.id }, data: { productId: p.toProductId, campaignId: null } });
+  // UNE transaction : l'ancien produit n'est conservé comme intérêt que si le prospect est réellement déplacé (tout ou rien), et une création concurrente du même intérêt est reprise en entier.
+  const u = await runTx(async (tx) => {
+    if (pr.productId) {
+      const known = await tx.prospectProduct.findUnique({ where: { prospectId_productId: { prospectId: pr.id, productId: pr.productId } }, select: { id: true } });
+      if (!known) await tx.prospectProduct.create({ data: { workspaceId: p.workspaceId, prospectId: pr.id, productId: pr.productId, note: "Ancienne attribution" } });
+    }
+    await tx.prospectProduct.deleteMany({ where: { prospectId: pr.id, productId: p.toProductId } });
+    return tx.prospect.update({ where: { id: pr.id }, data: { productId: p.toProductId, campaignId: null } });
+  }, { codes: UNIQUE_RETRY_CODES });
   await audit({ workspaceId: p.workspaceId, userId: p.actorId, action: "prospect.reassigned", entity: "Prospect", entityId: pr.id, meta: { from: pr.productId, to: p.toProductId, reason } });
   return u;
 }
 
-/** Opposition / désinscription : définitive, applicable à tous les produits, et répercutée dans la liste de suppression. */
+/**
+ * Opposition / désinscription : définitive, applicable à tous les produits, et répercutée dans la liste de suppression.
+ * UNE transaction : le statut du prospect et l'entrée de suppression sont enregistrés ensemble ou pas du tout (jamais « désinscrit » sans entrée de suppression). Rejouable : un prospect déjà
+ * désinscrit dont l'entrée manque (état laissé par une ancienne version, ou par un échec) est RÉPARÉ par un nouvel appel ; sinon le rejeu ne change rien (ni écriture, ni audit).
+ * Une création concurrente de la même entrée (backfill, désinscription d'un lead) fait reprendre la transaction entière (UNIQUE_RETRY_CODES).
+ */
 export async function optOutProspect(p: { workspaceId: string; prospectId: string; actorId?: string | null; reason?: string }): Promise<Prospect> {
-  const pr = await db.prospect.findFirst({ where: { id: p.prospectId, workspaceId: p.workspaceId } });
-  if (!pr) throw new PortfolioError("Prospect introuvable.");
-  if (pr.optedOutAt && pr.status === "do_not_contact") return pr; // rejeu
-  const u = await db.prospect.update({ where: { id: pr.id }, data: { status: "do_not_contact", optedOutAt: pr.optedOutAt ?? new Date(), campaignId: null, nextFollowUpAt: null } });
-  if (pr.email) { const key = suppressionWriteKey(p.workspaceId, pr.email, { fallback: "plain" }); await db.emailSuppression.upsert({ where: { workspaceId_email: { workspaceId: p.workspaceId, email: key } }, create: { workspaceId: p.workspaceId, email: key, reason: "prospect_opt_out" }, update: {} }); }
-  await audit({ workspaceId: p.workspaceId, userId: p.actorId, action: "prospect.opted_out", entity: "Prospect", entityId: pr.id, meta: { reason: p.reason ?? null } });
-  return u;
+  const r = await runTx(async (tx) => {
+    const pr = await tx.prospect.findFirst({ where: { id: p.prospectId, workspaceId: p.workspaceId } });
+    if (!pr) throw new PortfolioError("Prospect introuvable.");
+    const already = !!pr.optedOutAt && pr.status === "do_not_contact";
+    const key = pr.email ? suppressionWriteKey(p.workspaceId, pr.email, { fallback: "plain" }) : null;
+    const listed = key === null || !!(await tx.emailSuppression.findUnique({ where: { workspaceId_email: { workspaceId: p.workspaceId, email: key } }, select: { id: true } }));
+    if (already && listed) return { prospect: pr, changed: false }; // rejeu : rien à faire
+    const prospect = already ? pr : await tx.prospect.update({ where: { id: pr.id }, data: { status: "do_not_contact", optedOutAt: pr.optedOutAt ?? new Date(), campaignId: null, nextFollowUpAt: null } });
+    if (key !== null && !listed) await tx.emailSuppression.create({ data: { workspaceId: p.workspaceId, email: key, reason: "prospect_opt_out" } });
+    return { prospect, changed: !already };
+  }, { codes: UNIQUE_RETRY_CODES });
+  if (r.changed) await audit({ workspaceId: p.workspaceId, userId: p.actorId, action: "prospect.opted_out", entity: "Prospect", entityId: r.prospect.id, meta: { reason: p.reason ?? null } });
+  return r.prospect;
 }
 
 /**
@@ -186,24 +212,34 @@ export async function optOutProspect(p: { workspaceId: string; prospectId: strin
  * Les conversions déjà comptabilisées sont conservées sans note libre ; l'historique de contacts et les intérêts sont supprimés.
  */
 export async function eraseProspect(p: { workspaceId: string; prospectId: string; actorId?: string | null }): Promise<boolean> {
-  const pr = await db.prospect.findFirst({ where: { id: p.prospectId, workspaceId: p.workspaceId } });
-  if (!pr) return false;
-  if (pr.name === ERASED_NAME && pr.deletedAt) return true; // rejeu
-  if (pr.email) { const key = suppressionWriteKey(p.workspaceId, pr.email, { fallback: "plain" }); await db.emailSuppression.upsert({ where: { workspaceId_email: { workspaceId: p.workspaceId, email: key } }, create: { workspaceId: p.workspaceId, email: key, reason: "prospect_erased" }, update: {} }); }
-  await db.$transaction([
-    db.prospectContact.deleteMany({ where: { workspaceId: p.workspaceId, prospectId: pr.id } }),
-    db.prospectProduct.deleteMany({ where: { workspaceId: p.workspaceId, prospectId: pr.id } }),
-    db.productEvent.updateMany({ where: { workspaceId: p.workspaceId, prospectId: pr.id }, data: { note: null } }),
-    db.prospect.update({
+  const first = await db.prospect.findFirst({ where: { id: p.prospectId, workspaceId: p.workspaceId } });
+  if (!first) return false;
+  if (first.name === ERASED_NAME && first.deletedAt) return true; // rejeu
+  // UNE transaction : l'adresse est inscrite dans la liste de suppression et la fiche est anonymisée ENSEMBLE (tout ou rien) ; une création concurrente de la même entrée fait reprendre
+  // la transaction entière. La fiche est relue DANS la transaction : un effacement concurrent déjà validé n'est ni refait ni audité deux fois.
+  const done = await runTx(async (tx) => {
+    const pr = await tx.prospect.findFirst({ where: { id: p.prospectId, workspaceId: p.workspaceId } });
+    if (!pr) return false;
+    if (pr.name === ERASED_NAME && pr.deletedAt) return false;
+    if (pr.email) {
+      const key = suppressionWriteKey(p.workspaceId, pr.email, { fallback: "plain" });
+      const listed = await tx.emailSuppression.findUnique({ where: { workspaceId_email: { workspaceId: p.workspaceId, email: key } }, select: { id: true } });
+      if (!listed) await tx.emailSuppression.create({ data: { workspaceId: p.workspaceId, email: key, reason: "prospect_erased" } });
+    }
+    await tx.prospectContact.deleteMany({ where: { workspaceId: p.workspaceId, prospectId: pr.id } });
+    await tx.prospectProduct.deleteMany({ where: { workspaceId: p.workspaceId, prospectId: pr.id } });
+    await tx.productEvent.updateMany({ where: { workspaceId: p.workspaceId, prospectId: pr.id }, data: { note: null } });
+    await tx.prospect.update({
       where: { id: pr.id },
       data: {
         name: ERASED_NAME, company: null, jobTitle: null, email: null, phone: null, websiteDomain: null, segment: null, source: "effacé", sourceUrl: null,
         legalBasisNote: null, notes: null, importBatch: null, dedupeKey: `erased:${pr.id}`, status: "do_not_contact", optedOutAt: pr.optedOutAt ?? new Date(),
         campaignId: null, nextFollowUpAt: null, deletedAt: new Date(),
       },
-    }),
-  ]);
-  await audit({ workspaceId: p.workspaceId, userId: p.actorId, action: "prospect.erased", entity: "Prospect", entityId: pr.id });
+    });
+    return true;
+  }, { codes: UNIQUE_RETRY_CODES });
+  if (done) await audit({ workspaceId: p.workspaceId, userId: p.actorId, action: "prospect.erased", entity: "Prospect", entityId: first.id });
   return true;
 }
 

@@ -303,7 +303,7 @@ export async function logContact(p: {
 /**
  * Réponse reçue (consignée à la main). Remplace le statut « contacté » par « a répondu ».
  * UNE transaction : la ligne de contact entrant et son effet (changement de statut, ou opposition avec entrée de suppression) sont enregistrés ensemble ou pas du tout — jamais une réponse
- * « opposition » consignée sans que le prospect soit désinscrit. Une création concurrente de l'entrée de suppression fait reprendre la transaction entière (UNIQUE_RETRY_CODES) : la ligne de contact
+ * « opposition » consignée sans que le prospect soit désinscrit. Une réponse simple ne fait jamais perdre à un prospect déjà désinscrit son statut « ne pas contacter ». Une création concurrente de l'entrée de suppression fait reprendre la transaction entière (UNIQUE_RETRY_CODES) : la ligne de contact
  * de la tentative annulée n'existe plus, elle n'est pas dupliquée. L'audit d'opposition est écrit après validation, une seule fois, et seulement si l'opposition est nouvelle.
  */
 export async function logReply(p: { workspaceId: string; prospectId: string; channel: string; summary?: string | null; actorId?: string | null; optOut?: boolean }): Promise<Prospect> {
@@ -312,7 +312,8 @@ export async function logReply(p: { workspaceId: string; prospectId: string; cha
     if (!pr) throw new PortfolioError("Prospect introuvable.");
     await tx.prospectContact.create({ data: { workspaceId: p.workspaceId, prospectId: pr.id, productId: pr.productId, channel: p.channel, direction: "inbound", summary: p.summary?.slice(0, 2000) ?? null, outcome: p.optOut ? "opted_out" : "replied", actorId: p.actorId ?? null } });
     if (p.optOut) return optOutInTx(tx, { workspaceId: p.workspaceId, prospectId: pr.id });
-    const keep = ["demo", "trial", "customer"].includes(pr.status);
+    // Le statut n'est jamais ramené en arrière : « demo / trial / customer » et surtout « ne pas contacter » (opposition déjà enregistrée) sont conservés par une réponse simple.
+    const keep = ["demo", "trial", "customer", "do_not_contact"].includes(pr.status) || !!pr.optedOutAt;
     return { prospect: await tx.prospect.update({ where: { id: pr.id }, data: { status: keep ? pr.status : "replied" } }), changed: false };
   }, { codes: UNIQUE_RETRY_CODES });
   if (p.optOut && r.changed) await audit({ workspaceId: p.workspaceId, userId: p.actorId, action: "prospect.opted_out", entity: "Prospect", entityId: r.prospect.id, meta: { reason: "opposition dans la réponse" } });

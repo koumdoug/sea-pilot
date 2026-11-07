@@ -372,3 +372,32 @@ describe("logReply — une transaction : ligne de contact ET effet (statut ou op
     await expect(logReply({ workspaceId: foreign.workspaceId, prospectId: foreign.prospect.id, channel: "email" })).rejects.toBeInstanceOf(PortfolioError);
   });
 });
+
+describe("logReply — le statut « ne pas contacter » n'est jamais écrasé par une réponse simple (D5)", () => {
+  it("prospect désinscrit : une réponse simple est consignée mais le statut, la date d'opposition et l'entrée de suppression restent inchangés", async () => {
+    const { workspaceId, prospect } = await setup();
+    const opted = await optOutProspect({ workspaceId, prospectId: prospect.id });
+    const u = await logReply({ workspaceId, prospectId: prospect.id, channel: "email", summary: "Merci quand même" });
+    expect(u.status).toBe("do_not_contact");
+    expect(u.optedOutAt!.getTime()).toBe(opted.optedOutAt!.getTime());
+    expect(await row(prospect.id)).toMatchObject({ status: "do_not_contact" });
+    expect(await db.prospectContact.count({ where: { workspaceId, prospectId: prospect.id, direction: "inbound", outcome: "replied" } })).toBe(1);
+    expect(await suppressions(workspaceId)).toHaveLength(1);
+    expect(await audits(workspaceId, "prospect.opted_out")).toBe(1); // aucun nouvel audit
+  });
+
+  it("état hérité incohérent (date d'opposition présente, statut différent) : la réponse simple ne change pas le statut", async () => {
+    const { workspaceId, prospect } = await setup();
+    await db.prospect.update({ where: { id: prospect.id }, data: { status: "contacted", optedOutAt: new Date("2026-11-01T00:00:00Z") } });
+    expect((await logReply({ workspaceId, prospectId: prospect.id, channel: "email" })).status).toBe("contacted");
+  });
+
+  it("prospect non désinscrit : comportement inchangé (« a répondu »), « demo / trial / customer » conservés", async () => {
+    const { workspaceId, prospect } = await setup();
+    expect((await logReply({ workspaceId, prospectId: prospect.id, channel: "email" })).status).toBe("replied");
+    for (const status of ["demo", "trial", "customer"]) {
+      await db.prospect.update({ where: { id: prospect.id }, data: { status } });
+      expect((await logReply({ workspaceId, prospectId: prospect.id, channel: "email" })).status).toBe(status);
+    }
+  });
+});

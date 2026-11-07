@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import { db } from "@/lib/db";
-import { addProspect, ensureDefaultProducts, eraseProspect, logReply, optOutProspect, reassignProspect } from "@/lib/portfolio/service";
+import { addProspect, approveOutreachCampaign, attachProspectToCampaign, ensureDefaultProducts, eraseProspect, logReply, optOutProspect, reassignProspect } from "@/lib/portfolio/service";
 import { backfillSuppressionKeys, isEmailSuppressed, keyedEmailKey, suppressionKeyring } from "@/lib/suppression";
 import { setRetryTimingForTests } from "@/lib/followup-runtime";
 import { makeWorkspace, resetDb } from "./helpers";
@@ -117,6 +117,41 @@ describe.skipIf(!isPg)("PostgreSQL — portefeuille : clé de suppression / int�
       expect(await suppressions(workspaceId)).toHaveLength(1);
       expect(await isEmailSuppressed(db, workspaceId, EMAIL)).toBe(true);
       expect(await audits(workspaceId, "prospect.opted_out")).toBe(1);
+    }
+  }, 120_000);
+
+  it("rattachement à une campagne pendant une opposition validée par un autre client : refus, le prospect désinscrit n'est JAMAIS rattaché (5 fois)", async () => {
+    for (let i = 0; i < 5; i++) {
+      await resetDb();
+      const { workspaceId, prospect, driver } = await setup();
+      const campaign = await db.outreachCampaign.create({ data: { workspaceId, productId: driver.id, name: "C1", channel: "email", status: "active" } });
+      // Le client B désinscrit le prospect dans une transaction qu'il garde ouverte : le rattachement lit l'ancien état (non désinscrit), puis son écriture attend le verrou de la ligne.
+      const b = holdWrite((t) => t.prospect.update({ where: { id: prospect.id }, data: { status: "do_not_contact", optedOutAt: new Date() } }));
+      await b.wasWritten;
+      const a = attachProspectToCampaign({ workspaceId, campaignId: campaign.id, prospectId: prospect.id });
+      const outcome = a.then(() => null, (e: unknown) => e);
+      await b.done;
+      const err = await outcome;
+      expect(err, `itération ${i} : le rattachement doit être refusé`).toBeInstanceOf(Error);
+      expect((err as Error).message).toMatch(/opposé/);
+      const p = await db.prospect.findUniqueOrThrow({ where: { id: prospect.id } });
+      expect(p).toMatchObject({ status: "do_not_contact", campaignId: null }); // avant le correctif : la campagne était écrite sur un prospect désinscrit
+      expect(await audits(workspaceId, "outreach.prospect_attached")).toBe(0);
+    }
+  }, 120_000);
+
+  it("approbation de campagne : 10 approbations simultanées → toutes réussissent, une seule transition, un seul audit (5 fois)", async () => {
+    for (let i = 0; i < 5; i++) {
+      await resetDb();
+      const { workspaceId, userId, driver } = await setup();
+      await db.product.update({ where: { id: driver.id }, data: { status: "commercialisation" } });
+      await db.outreachChannel.create({ data: { workspaceId, channel: "email", enabled: true } });
+      const tpl = await db.messageTemplate.create({ data: { workspaceId, productId: driver.id, name: "T", channel: "email", body: "Bonjour", status: "approved" } });
+      const c = await db.outreachCampaign.create({ data: { workspaceId, productId: driver.id, name: "À approuver", channel: "email", status: "pending_approval", templateId: tpl.id } });
+      const r = await Promise.allSettled(Array.from({ length: 10 }, () => approveOutreachCampaign({ workspaceId, campaignId: c.id, actorId: userId })));
+      expect(r.map((x) => x.status), `itération ${i}`).toEqual(Array(10).fill("fulfilled"));
+      expect((await db.outreachCampaign.findUniqueOrThrow({ where: { id: c.id } })).status).toBe("active");
+      expect(await audits(workspaceId, "outreach.campaign_approved")).toBe(1);
     }
   }, 120_000);
 

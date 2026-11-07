@@ -321,36 +321,65 @@ export async function logReply(p: { workspaceId: string; prospectId: string; cha
 }
 
 // ───────────── Campagnes de prospection : approbation humaine ─────────────
-export async function attachProspectToCampaign(p: { workspaceId: string; campaignId: string; prospectId: string; actorId?: string | null }): Promise<void> {
-  const [c, pr] = await Promise.all([
-    db.outreachCampaign.findFirst({ where: { id: p.campaignId, workspaceId: p.workspaceId } }),
-    db.prospect.findFirst({ where: { id: p.prospectId, workspaceId: p.workspaceId, deletedAt: null } }),
-  ]);
-  if (!c || !pr) throw new PortfolioError("Campagne ou prospect introuvable.");
-  if (pr.productId !== c.productId) throw new PortfolioError("Le prospect n'est pas attribué au produit de cette campagne.");
-  if (pr.optedOutAt || pr.status === "do_not_contact") throw new PortfolioError("Le prospect s'est opposé à tout contact.");
-  if (pr.campaignId && pr.campaignId !== c.id) throw new PortfolioError("Le prospect est déjà dans une autre campagne de prospection (une seule à la fois).");
-  await db.prospect.update({ where: { id: pr.id }, data: { campaignId: c.id } });
-  await audit({ workspaceId: p.workspaceId, userId: p.actorId, action: "outreach.prospect_attached", entity: "OutreachCampaign", entityId: c.id, meta: { prospectId: pr.id } });
+/** Raison pour laquelle le prospect ne peut pas rejoindre la campagne `c` (null si rien ne s'y oppose). */
+function attachProblem(pr: Prospect, c: { id: string; productId: string }): string | null {
+  if (pr.productId !== c.productId) return "Le prospect n'est pas attribué au produit de cette campagne.";
+  if (pr.optedOutAt || pr.status === "do_not_contact") return "Le prospect s'est opposé à tout contact.";
+  if (pr.campaignId && pr.campaignId !== c.id) return "Le prospect est déjà dans une autre campagne de prospection (une seule à la fois).";
+  return null;
 }
 
+/**
+ * Rattache un prospect à une campagne. Les contrôles et l'écriture sont dans UNE transaction, et l'écriture est CONDITIONNELLE (une seule requête portant les mêmes conditions) : si, entre la lecture et
+ * l'écriture, le prospect s'est opposé à tout contact, a changé de produit, a été effacé ou a rejoint une autre campagne, rien n'est écrit et l'erreur correspondante est levée. Sans cela, une opposition
+ * simultanée pouvait être écrasée et un prospect désinscrit se retrouver dans une campagne. Rejouable : déjà dans CETTE campagne, rien ne change (ni écriture, ni audit).
+ */
+export async function attachProspectToCampaign(p: { workspaceId: string; campaignId: string; prospectId: string; actorId?: string | null }): Promise<void> {
+  const changed = await runTx(async (tx) => {
+    const c = await tx.outreachCampaign.findFirst({ where: { id: p.campaignId, workspaceId: p.workspaceId } });
+    const pr = await tx.prospect.findFirst({ where: { id: p.prospectId, workspaceId: p.workspaceId, deletedAt: null } });
+    if (!c || !pr) throw new PortfolioError("Campagne ou prospect introuvable.");
+    const problem = attachProblem(pr, c);
+    if (problem) throw new PortfolioError(problem);
+    const w = await tx.prospect.updateMany({
+      where: { id: pr.id, workspaceId: p.workspaceId, deletedAt: null, optedOutAt: null, status: { not: "do_not_contact" }, productId: c.productId, OR: [{ campaignId: null }, { campaignId: c.id }] },
+      data: { campaignId: c.id },
+    });
+    if (w.count !== 1) {
+      const fresh = await tx.prospect.findFirst({ where: { id: pr.id, workspaceId: p.workspaceId, deletedAt: null } });
+      throw new PortfolioError(fresh ? attachProblem(fresh, c) ?? "Le prospect a changé pendant l'opération : réessayez." : "Campagne ou prospect introuvable.");
+    }
+    return pr.campaignId !== c.id;
+  });
+  if (changed) await audit({ workspaceId: p.workspaceId, userId: p.actorId, action: "outreach.prospect_attached", entity: "OutreachCampaign", entityId: p.campaignId, meta: { prospectId: p.prospectId } });
+}
+
+/**
+ * Approbation humaine d'une campagne. Les contrôles (produit commercialisé, canal activé, modèle approuvé) sont relus DANS la transaction et le passage à « active » est une transition CONDITIONNELLE
+ * (« pending_approval » seulement) : deux approbations simultanées n'en font qu'une (un seul audit), la seconde est un rejeu. Limite : les contrôles portent sur d'autres tables sans verrou ; un modèle
+ * retiré exactement entre la lecture et l'écriture reste possible (fenêtre de quelques millisecondes), la campagne ne partant de toute façon qu'après les contrôles propres à chaque envoi.
+ */
 export async function approveOutreachCampaign(p: { workspaceId: string; campaignId: string; actorId?: string | null }): Promise<void> {
-  const c = await db.outreachCampaign.findFirst({ where: { id: p.campaignId, workspaceId: p.workspaceId } });
-  if (!c) throw new PortfolioError("Campagne introuvable.");
-  if (c.status === "active") return; // rejeu
-  if (c.status !== "pending_approval") throw new PortfolioError("La campagne doit d'abord être soumise à l'approbation.");
-  const [product, channel, template] = await Promise.all([
-    db.product.findFirst({ where: { id: c.productId, workspaceId: p.workspaceId, deletedAt: null }, select: { status: true } }),
-    db.outreachChannel.findUnique({ where: { workspaceId_channel: { workspaceId: p.workspaceId, channel: c.channel } } }),
-    c.templateId ? db.messageTemplate.findFirst({ where: { id: c.templateId, workspaceId: p.workspaceId } }) : null,
-  ]);
-  const problems: string[] = [];
-  if (product?.status !== "commercialisation") problems.push("le produit n'est pas en commercialisation");
-  if (!channel?.enabled) problems.push("le canal est désactivé");
-  if (!template || template.status !== "approved" || template.productId !== c.productId || template.channel !== c.channel) problems.push("aucun modèle de message approuvé pour ce produit et ce canal");
-  if (problems.length) throw new PortfolioError(`Approbation impossible : ${problems.join(" ; ")}.`);
-  await db.outreachCampaign.update({ where: { id: c.id }, data: { status: "active", approvedById: p.actorId ?? null, approvedAt: new Date() } });
-  await audit({ workspaceId: p.workspaceId, userId: p.actorId, action: "outreach.campaign_approved", entity: "OutreachCampaign", entityId: c.id });
+  const changed = await runTx(async (tx) => {
+    const c = await tx.outreachCampaign.findFirst({ where: { id: p.campaignId, workspaceId: p.workspaceId } });
+    if (!c) throw new PortfolioError("Campagne introuvable.");
+    if (c.status === "active") return false; // rejeu
+    if (c.status !== "pending_approval") throw new PortfolioError("La campagne doit d'abord être soumise à l'approbation.");
+    const product = await tx.product.findFirst({ where: { id: c.productId, workspaceId: p.workspaceId, deletedAt: null }, select: { status: true } });
+    const channel = await tx.outreachChannel.findUnique({ where: { workspaceId_channel: { workspaceId: p.workspaceId, channel: c.channel } } });
+    const template = c.templateId ? await tx.messageTemplate.findFirst({ where: { id: c.templateId, workspaceId: p.workspaceId } }) : null;
+    const problems: string[] = [];
+    if (product?.status !== "commercialisation") problems.push("le produit n'est pas en commercialisation");
+    if (!channel?.enabled) problems.push("le canal est désactivé");
+    if (!template || template.status !== "approved" || template.productId !== c.productId || template.channel !== c.channel) problems.push("aucun modèle de message approuvé pour ce produit et ce canal");
+    if (problems.length) throw new PortfolioError(`Approbation impossible : ${problems.join(" ; ")}.`);
+    const u = await tx.outreachCampaign.updateMany({ where: { id: c.id, workspaceId: p.workspaceId, status: "pending_approval" }, data: { status: "active", approvedById: p.actorId ?? null, approvedAt: new Date() } });
+    if (u.count === 1) return true;
+    const fresh = await tx.outreachCampaign.findFirst({ where: { id: c.id, workspaceId: p.workspaceId }, select: { status: true } });
+    if (fresh?.status === "active") return false; // approuvée entre-temps par un autre traitement : rejeu
+    throw new PortfolioError("La campagne a changé pendant l'opération : réessayez.");
+  });
+  if (changed) await audit({ workspaceId: p.workspaceId, userId: p.actorId, action: "outreach.campaign_approved", entity: "OutreachCampaign", entityId: p.campaignId });
 }
 
 // ───────────── Conversions ─────────────
@@ -370,15 +399,20 @@ export async function recordProductEvent(i: RecordEventInput): Promise<{ created
   if (!i.prospectId && !i.externalRef?.trim()) throw new PortfolioError("Indiquez le prospect concerné ou une référence externe (traçabilité de la source).");
   const key = eventDedupeKey({ productId: i.productId, type: i.type, prospectId: i.prospectId, externalRef: i.externalRef, occurredAt: i.occurredAt, amount: i.amount });
   try {
-    const ev = await db.productEvent.create({
-      data: {
-        workspaceId: i.workspaceId, productId: i.productId, prospectId: i.prospectId ?? null, type: i.type, occurredAt: i.occurredAt, amount: i.amount ?? null,
-        currency: i.currency?.toUpperCase().slice(0, 3) ?? null, source: i.source ?? "manual", externalRef: i.externalRef?.trim() || null, dedupeKey: key, note: i.note?.slice(0, 500) ?? null, recordedById: i.actorId ?? null,
-      },
+    // UNE transaction : la conversion et le changement de statut du prospect sont enregistrés ensemble ou pas du tout. Sinon, une conversion enregistrée sans son changement de statut serait
+    // définitivement perdue pour le statut : le rejeu la reconnaîtrait comme doublon. Une conversion déjà connue (P2002) annule la transaction et est reconnue plus bas, comme avant.
+    const ev = await runTx(async (tx) => {
+      const created = await tx.productEvent.create({
+        data: {
+          workspaceId: i.workspaceId, productId: i.productId, prospectId: i.prospectId ?? null, type: i.type, occurredAt: i.occurredAt, amount: i.amount ?? null,
+          currency: i.currency?.toUpperCase().slice(0, 3) ?? null, source: i.source ?? "manual", externalRef: i.externalRef?.trim() || null, dedupeKey: key, note: i.note?.slice(0, 500) ?? null, recordedById: i.actorId ?? null,
+        },
+      });
+      const next = STATUS_AFTER_EVENT[i.type as ProductEventType];
+      // Un prospect qui s'est opposé à tout contact garde son statut « ne pas contacter » : la conversion est comptée, pas son statut.
+      if (i.prospectId && next) await tx.prospect.updateMany({ where: { id: i.prospectId, workspaceId: i.workspaceId, optedOutAt: null }, data: { status: next, campaignId: null } });
+      return created;
     });
-    const next = STATUS_AFTER_EVENT[i.type as ProductEventType];
-    // Un prospect qui s'est opposé à tout contact garde son statut « ne pas contacter » : la conversion est comptée, pas son statut.
-    if (i.prospectId && next) await db.prospect.updateMany({ where: { id: i.prospectId, workspaceId: i.workspaceId, optedOutAt: null }, data: { status: next, campaignId: null } });
     await audit({ workspaceId: i.workspaceId, userId: i.actorId, action: "product_event.recorded", entity: "ProductEvent", entityId: ev.id, meta: { productId: i.productId, type: i.type, source: i.source ?? "manual" } });
     return { created: true, id: ev.id };
   } catch (e) {

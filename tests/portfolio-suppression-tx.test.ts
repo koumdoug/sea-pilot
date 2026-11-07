@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
-import { addProspect, ensureDefaultProducts, eraseProspect, logContact, optOutProspect, PortfolioError, reassignProspect } from "@/lib/portfolio/service";
+import { addProspect, ensureDefaultProducts, eraseProspect, logContact, logReply, optOutProspect, PortfolioError, reassignProspect } from "@/lib/portfolio/service";
 import { TX_MAX_RETRIES, setRetryTimingForTests } from "@/lib/followup-runtime";
 import { makeWorkspace, resetDb } from "./helpers";
 
@@ -274,5 +274,101 @@ describe("reassignProspect — une transaction : intérêt conservé ET prospect
     expect(again.productId).toBe(nexa.id);
     expect(await db.prospectProduct.count({ where: { prospectId: prospect.id } })).toBe(1);
     expect(await audits(workspaceId, "prospect.reassigned")).toBe(1);
+  });
+});
+
+describe("logReply — une transaction : ligne de contact ET effet (statut ou opposition)", () => {
+  const contacts = (workspaceId: string, prospectId: string) => db.prospectContact.findMany({ where: { workspaceId, prospectId, direction: "inbound" } });
+
+  it("réponse simple : contact enregistré (« replied »), prospect « a répondu », aucun audit d'opposition", async () => {
+    const { workspaceId, prospect } = await setup();
+    const u = await logReply({ workspaceId, prospectId: prospect.id, channel: "email", summary: "Intéressé" });
+    expect(u.status).toBe("replied");
+    expect(await contacts(workspaceId, prospect.id)).toHaveLength(1);
+    expect((await contacts(workspaceId, prospect.id))[0].outcome).toBe("replied");
+    expect(await audits(workspaceId, "prospect.opted_out")).toBe(0);
+  });
+
+  it("réponse avec opposition : contact « opted_out », prospect désinscrit, entrée de suppression unique, audit unique avec le motif de la réponse", async () => {
+    const { workspaceId, prospect } = await setup();
+    const u = await logReply({ workspaceId, prospectId: prospect.id, channel: "email", optOut: true });
+    expect(u.status).toBe("do_not_contact");
+    const c = await contacts(workspaceId, prospect.id);
+    expect(c).toHaveLength(1);
+    expect(c[0].outcome).toBe("opted_out");
+    expect((await suppressions(workspaceId)).map((s) => [s.email, s.reason])).toEqual([[EMAIL, "prospect_opt_out"]]);
+    expect(await audits(workspaceId, "prospect.opted_out")).toBe(1);
+    const a = await db.auditLog.findFirstOrThrow({ where: { workspaceId, action: "prospect.opted_out" } });
+    expect(JSON.stringify(a.meta)).toContain("opposition dans la réponse");
+  });
+
+  it("opposition : échec de l'écriture de la suppression → AUCUNE ligne de contact conservée, prospect inchangé, aucun audit, erreur relancée", async () => {
+    const { workspaceId, prospect } = await setup();
+    const st = inject("emailSuppression", "create", () => new Error("écriture de la suppression impossible"));
+    await expect(logReply({ workspaceId, prospectId: prospect.id, channel: "email", optOut: true })).rejects.toThrow(/suppression impossible/);
+    expect(st.attempts).toBe(1);
+    expect(await contacts(workspaceId, prospect.id)).toHaveLength(0); // avant le correctif : la réponse « opposition » restait consignée sans désinscription
+    expect(await row(prospect.id)).toMatchObject({ status: "identified", optedOutAt: null });
+    expect(await suppressions(workspaceId)).toHaveLength(0);
+    expect(await audits(workspaceId, "prospect.opted_out")).toBe(0);
+  });
+
+  it("opposition : échec de la mise à jour du prospect → aucune ligne de contact, aucune entrée de suppression", async () => {
+    const { workspaceId, prospect } = await setup();
+    inject("prospect", "update", () => new Error("mise à jour impossible"));
+    await expect(logReply({ workspaceId, prospectId: prospect.id, channel: "email", optOut: true })).rejects.toThrow(/mise à jour impossible/);
+    expect(await contacts(workspaceId, prospect.id)).toHaveLength(0);
+    expect(await suppressions(workspaceId)).toHaveLength(0);
+    expect(await row(prospect.id)).toMatchObject({ status: "identified" });
+  });
+
+  it("réponse simple : échec de la mise à jour du statut → aucune ligne de contact conservée", async () => {
+    const { workspaceId, prospect } = await setup();
+    inject("prospect", "update", () => new Error("mise à jour impossible"));
+    await expect(logReply({ workspaceId, prospectId: prospect.id, channel: "email" })).rejects.toThrow(/mise à jour impossible/);
+    expect(await contacts(workspaceId, prospect.id)).toHaveLength(0);
+    expect(await row(prospect.id)).toMatchObject({ status: "identified" });
+  });
+
+  it("P2002 à la 1re tentative (entrée de suppression créée en même temps) : 2 transactions, reprise COMPLÈTE, UNE seule ligne de contact, audit unique", async () => {
+    const { workspaceId, prospect } = await setup();
+    const st = inject("emailSuppression", "create", (n) => (n === 1 ? prismaError("P2002") : null));
+    const u = await logReply({ workspaceId, prospectId: prospect.id, channel: "email", optOut: true });
+    expect(st.attempts).toBe(2);
+    expect(u.status).toBe("do_not_contact");
+    expect(await contacts(workspaceId, prospect.id)).toHaveLength(1); // la ligne de la 1re tentative a été annulée, pas dupliquée
+    expect(await suppressions(workspaceId)).toHaveLength(1);
+    expect(await audits(workspaceId, "prospect.opted_out")).toBe(1);
+  });
+
+  it("P2002 persistante : arrêtée au maximum, erreur relancée, AUCUNE ligne de contact, prospect non désinscrit", async () => {
+    const { workspaceId, prospect } = await setup();
+    const st = inject("emailSuppression", "create", () => prismaError("P2002"));
+    await expect(logReply({ workspaceId, prospectId: prospect.id, channel: "email", optOut: true })).rejects.toMatchObject({ code: "P2002" });
+    expect(st.attempts).toBe(1 + TX_MAX_RETRIES);
+    expect(await contacts(workspaceId, prospect.id)).toHaveLength(0);
+    expect(await row(prospect.id)).toMatchObject({ status: "identified", optedOutAt: null });
+    expect(await audits(workspaceId, "prospect.opted_out")).toBe(0);
+  });
+
+  it("opposition sur un prospect déjà désinscrit : contact consigné, aucune nouvelle entrée ni nouvel audit ; statut « demo/trial/customer » conservé pour une réponse simple", async () => {
+    const { workspaceId, prospect } = await setup();
+    await optOutProspect({ workspaceId, prospectId: prospect.id });
+    await logReply({ workspaceId, prospectId: prospect.id, channel: "email", optOut: true });
+    expect(await contacts(workspaceId, prospect.id)).toHaveLength(1);
+    expect(await suppressions(workspaceId)).toHaveLength(1);
+    expect(await audits(workspaceId, "prospect.opted_out")).toBe(1);
+    const other = await setup();
+    await db.prospect.update({ where: { id: other.prospect.id }, data: { status: "trial" } });
+    expect((await logReply({ workspaceId: other.workspaceId, prospectId: other.prospect.id, channel: "email" })).status).toBe("trial");
+  });
+
+  it("prospect introuvable, effacé ou d'un autre espace : erreur, aucune ligne de contact", async () => {
+    const { workspaceId } = await setup();
+    const foreign = await setup();
+    await expect(logReply({ workspaceId, prospectId: foreign.prospect.id, channel: "email" })).rejects.toBeInstanceOf(PortfolioError);
+    expect(await db.prospectContact.count({ where: { prospectId: foreign.prospect.id } })).toBe(0);
+    await eraseProspect({ workspaceId: foreign.workspaceId, prospectId: foreign.prospect.id });
+    await expect(logReply({ workspaceId: foreign.workspaceId, prospectId: foreign.prospect.id, channel: "email" })).rejects.toBeInstanceOf(PortfolioError);
   });
 });

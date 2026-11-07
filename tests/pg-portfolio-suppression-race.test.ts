@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import { db } from "@/lib/db";
-import { addProspect, ensureDefaultProducts, eraseProspect, optOutProspect, reassignProspect } from "@/lib/portfolio/service";
+import { addProspect, ensureDefaultProducts, eraseProspect, logReply, optOutProspect, reassignProspect } from "@/lib/portfolio/service";
 import { backfillSuppressionKeys, isEmailSuppressed, keyedEmailKey, suppressionKeyring } from "@/lib/suppression";
 import { setRetryTimingForTests } from "@/lib/followup-runtime";
 import { makeWorkspace, resetDb } from "./helpers";
@@ -98,6 +98,25 @@ describe.skipIf(!isPg)("PostgreSQL — portefeuille : clé de suppression / int�
       expect(await suppressions(workspaceId)).toHaveLength(1);
       expect(await isEmailSuppressed(db, workspaceId, EMAIL)).toBe(true);
       expect(await audits(workspaceId, "prospect.erased")).toBe(1);
+    }
+  }, 120_000);
+
+  it("réponse avec opposition : collision reprise en entier (5 fois), UNE seule ligne de contact, prospect bloqué, UNE entrée HMAC, audit unique", async () => {
+    for (let i = 0; i < 5; i++) {
+      await resetDb();
+      const { workspaceId, prospect } = await setup();
+      const tx = countTransactions();
+      const b = holdWrite((t) => t.emailSuppression.create({ data: { workspaceId, email: hmacKey(workspaceId), reason: "unsubscribe" } }));
+      await b.wasWritten;
+      const u = logReply({ workspaceId, prospectId: prospect.id, channel: "email", optOut: true });
+      await b.done;
+      expect((await u).status).toBe("do_not_contact");
+      expect(tx.n, `itération ${i} : la collision a bien eu lieu`).toBe(2);
+      vi.restoreAllMocks();
+      expect(await db.prospectContact.count({ where: { prospectId: prospect.id, direction: "inbound" } })).toBe(1); // jamais dupliquée par la reprise
+      expect(await suppressions(workspaceId)).toHaveLength(1);
+      expect(await isEmailSuppressed(db, workspaceId, EMAIL)).toBe(true);
+      expect(await audits(workspaceId, "prospect.opted_out")).toBe(1);
     }
   }, 120_000);
 

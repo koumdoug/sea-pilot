@@ -6,7 +6,7 @@ import { audit } from "../audit";
 import { slugify } from "../workspaces";
 import { DEFAULT_PRODUCTS } from "./catalog";
 import { UNKNOWN_KEY_REASON, suppressionStatus, suppressionWriteKey, type SuppressionStatus } from "../suppression";
-import { TX_RETRY_CODES, runTx } from "../followup-runtime";
+import { TX_RETRY_CODES, runTx, type Tx } from "../followup-runtime";
 import {
   contactEligibility, dedupeKeyOf, domainOf, eventDedupeKey, normalizeEmail, EVENT_TYPES, LEGAL_BASES, OUTREACH_CHANNELS,
   type Eligibility, type ImportRow, type ProductEventType,
@@ -191,19 +191,25 @@ export async function reassignProspect(p: { workspaceId: string; prospectId: str
  * Une création concurrente de la même entrée (backfill, désinscription d'un lead) fait reprendre la transaction entière (UNIQUE_RETRY_CODES).
  */
 export async function optOutProspect(p: { workspaceId: string; prospectId: string; actorId?: string | null; reason?: string }): Promise<Prospect> {
-  const r = await runTx(async (tx) => {
-    const pr = await tx.prospect.findFirst({ where: { id: p.prospectId, workspaceId: p.workspaceId } });
-    if (!pr) throw new PortfolioError("Prospect introuvable.");
-    const already = !!pr.optedOutAt && pr.status === "do_not_contact";
-    const key = pr.email ? suppressionWriteKey(p.workspaceId, pr.email, { fallback: "plain" }) : null;
-    const listed = key === null || !!(await tx.emailSuppression.findUnique({ where: { workspaceId_email: { workspaceId: p.workspaceId, email: key } }, select: { id: true } }));
-    if (already && listed) return { prospect: pr, changed: false }; // rejeu : rien à faire
-    const prospect = already ? pr : await tx.prospect.update({ where: { id: pr.id }, data: { status: "do_not_contact", optedOutAt: pr.optedOutAt ?? new Date(), campaignId: null, nextFollowUpAt: null } });
-    if (key !== null && !listed) await tx.emailSuppression.create({ data: { workspaceId: p.workspaceId, email: key, reason: "prospect_opt_out" } });
-    return { prospect, changed: !already };
-  }, { codes: UNIQUE_RETRY_CODES });
+  const r = await runTx((tx) => optOutInTx(tx, p), { codes: UNIQUE_RETRY_CODES });
   if (r.changed) await audit({ workspaceId: p.workspaceId, userId: p.actorId, action: "prospect.opted_out", entity: "Prospect", entityId: r.prospect.id, meta: { reason: p.reason ?? null } });
   return r.prospect;
+}
+
+/**
+ * Corps de l'opposition, DANS la transaction de l'appelant (`optOutProspect`, `logReply`) : statut du prospect et entrée de suppression écrits ensemble. N'écrit AUCUN audit (l'appelant l'écrit
+ * après validation, une seule fois, seulement si `changed`). Ne contient aucun appel à `db` hors `tx` (SQLite n'a qu'une connexion).
+ */
+async function optOutInTx(tx: Tx, p: { workspaceId: string; prospectId: string }): Promise<{ prospect: Prospect; changed: boolean }> {
+  const pr = await tx.prospect.findFirst({ where: { id: p.prospectId, workspaceId: p.workspaceId } });
+  if (!pr) throw new PortfolioError("Prospect introuvable.");
+  const already = !!pr.optedOutAt && pr.status === "do_not_contact";
+  const key = pr.email ? suppressionWriteKey(p.workspaceId, pr.email, { fallback: "plain" }) : null;
+  const listed = key === null || !!(await tx.emailSuppression.findUnique({ where: { workspaceId_email: { workspaceId: p.workspaceId, email: key } }, select: { id: true } }));
+  if (already && listed) return { prospect: pr, changed: false }; // rejeu : rien à faire
+  const prospect = already ? pr : await tx.prospect.update({ where: { id: pr.id }, data: { status: "do_not_contact", optedOutAt: pr.optedOutAt ?? new Date(), campaignId: null, nextFollowUpAt: null } });
+  if (key !== null && !listed) await tx.emailSuppression.create({ data: { workspaceId: p.workspaceId, email: key, reason: "prospect_opt_out" } });
+  return { prospect, changed: !already };
 }
 
 /**
@@ -294,14 +300,23 @@ export async function logContact(p: {
   return { eligibility, prospect };
 }
 
-/** Réponse reçue (consignée à la main). Remplace le statut « contacté » par « a répondu ». */
+/**
+ * Réponse reçue (consignée à la main). Remplace le statut « contacté » par « a répondu ».
+ * UNE transaction : la ligne de contact entrant et son effet (changement de statut, ou opposition avec entrée de suppression) sont enregistrés ensemble ou pas du tout — jamais une réponse
+ * « opposition » consignée sans que le prospect soit désinscrit. Une création concurrente de l'entrée de suppression fait reprendre la transaction entière (UNIQUE_RETRY_CODES) : la ligne de contact
+ * de la tentative annulée n'existe plus, elle n'est pas dupliquée. L'audit d'opposition est écrit après validation, une seule fois, et seulement si l'opposition est nouvelle.
+ */
 export async function logReply(p: { workspaceId: string; prospectId: string; channel: string; summary?: string | null; actorId?: string | null; optOut?: boolean }): Promise<Prospect> {
-  const pr = await db.prospect.findFirst({ where: { id: p.prospectId, workspaceId: p.workspaceId, deletedAt: null } });
-  if (!pr) throw new PortfolioError("Prospect introuvable.");
-  await db.prospectContact.create({ data: { workspaceId: p.workspaceId, prospectId: pr.id, productId: pr.productId, channel: p.channel, direction: "inbound", summary: p.summary?.slice(0, 2000) ?? null, outcome: p.optOut ? "opted_out" : "replied", actorId: p.actorId ?? null } });
-  if (p.optOut) return optOutProspect({ workspaceId: p.workspaceId, prospectId: pr.id, actorId: p.actorId, reason: "opposition dans la réponse" });
-  const keep = ["demo", "trial", "customer"].includes(pr.status);
-  return db.prospect.update({ where: { id: pr.id }, data: { status: keep ? pr.status : "replied" } });
+  const r = await runTx(async (tx) => {
+    const pr = await tx.prospect.findFirst({ where: { id: p.prospectId, workspaceId: p.workspaceId, deletedAt: null } });
+    if (!pr) throw new PortfolioError("Prospect introuvable.");
+    await tx.prospectContact.create({ data: { workspaceId: p.workspaceId, prospectId: pr.id, productId: pr.productId, channel: p.channel, direction: "inbound", summary: p.summary?.slice(0, 2000) ?? null, outcome: p.optOut ? "opted_out" : "replied", actorId: p.actorId ?? null } });
+    if (p.optOut) return optOutInTx(tx, { workspaceId: p.workspaceId, prospectId: pr.id });
+    const keep = ["demo", "trial", "customer"].includes(pr.status);
+    return { prospect: await tx.prospect.update({ where: { id: pr.id }, data: { status: keep ? pr.status : "replied" } }), changed: false };
+  }, { codes: UNIQUE_RETRY_CODES });
+  if (p.optOut && r.changed) await audit({ workspaceId: p.workspaceId, userId: p.actorId, action: "prospect.opted_out", entity: "Prospect", entityId: r.prospect.id, meta: { reason: "opposition dans la réponse" } });
+  return r.prospect;
 }
 
 // ───────────── Campagnes de prospection : approbation humaine ─────────────

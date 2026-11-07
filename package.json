@@ -18,7 +18,8 @@
     "db:deploy": "prisma migrate deploy",
     "seed": "tsx --env-file=.env prisma/seed.ts",
     "check:env": "tsx scripts/check-env.ts",
-    "check:stripe": "tsx scripts/check-stripe-prices.ts"
+    "check:stripe": "tsx scripts/check-stripe-prices.ts",
+    "smoke:prod": "tsx scripts/smoke-production.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.19.3",

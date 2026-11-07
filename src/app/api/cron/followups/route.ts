@@ -91,9 +91,11 @@ async function handle(req: Request) {
   if (url.searchParams.get("purge") !== "0") { try { ledgerPurged = await purgeStripeEvents(); } catch (e) { log.warn("cron.ledger_purge_failed", { error: errMsg(e) }); } }
 
   const followupsComplete = !("crashed" in followups) && followups.deferred === 0;
-  const complete = followupsComplete && syncs.deferred === 0 && !syncs.planFailed && !reconcileDisabled && !stripeAbsentIncomplete && ("skipped" in billing || billing.complete);
+  const outboundDisabled = env.outboundSendingDisabled; // interrupteur global des envois : les relances e-mail sont volontairement en attente, la tâche n'est donc pas complète
+  if (outboundDisabled) log.warn("cron.outbound_sending_disabled", {});
+  const complete = !outboundDisabled && followupsComplete && syncs.deferred === 0 && !syncs.planFailed && !reconcileDisabled && !stripeAbsentIncomplete && ("skipped" in billing || billing.complete);
   log.info("cron.summary", { complete, disabledStages, followups, syncs, billing, elapsedMs: Date.now() - startedAt });
-  return Response.json({ followups, syncs: syncs.ok + syncs.errors, syncErrors: syncs.errors, syncSkipped: { inactive: syncs.skippedInactive, overLimit: syncs.skippedOverLimit }, syncDeferred: syncs.deferred, syncPlanFailed: syncs.planFailed, billing, ledgerPurged, disabledStages, complete });
+  return Response.json({ followups, syncs: syncs.ok + syncs.errors, syncErrors: syncs.errors, syncSkipped: { inactive: syncs.skippedInactive, overLimit: syncs.skippedOverLimit }, syncDeferred: syncs.deferred, syncPlanFailed: syncs.planFailed, billing, ledgerPurged, disabledStages, ...(outboundDisabled ? { outboundSendingDisabled: true } : {}), complete });
 }
 
 export const GET = handle;

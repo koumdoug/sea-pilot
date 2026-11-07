@@ -26,6 +26,15 @@ export const env = {
   /** Identifiants d'utilisateurs (cuid) dont l'espace dont ils sont propriétaires est exempté de facturation. Vide = aucune exception. */
   get freeAccessUserIds(): string[] { return (opt("FREE_ACCESS_USER_IDS") ?? "").split(",").map((x) => x.trim()).filter(Boolean); },
   get cronSecret() { return opt("CRON_SECRET"); },
+  /**
+   * INTERRUPTEUR GLOBAL des envois sortants (relances e-mail automatiques et renvois manuels) : activé par toute valeur non vide SAUF « 0 », « false », « no », « non » et « off » (insensible à la casse).
+   * Un doute (faute de frappe) bloque donc les envois plutôt que de les laisser partir. Lu à chaque appel : un changement de variable prend effet au redémarrage du processus.
+   * Les relances de type tâche, rappel et changement de statut continuent ; les relances e-mail restent EN ATTENTE, intactes, et repartent à la désactivation. Les e-mails système (mot de passe oublié) ne sont pas concernés.
+   */
+  get outboundSendingDisabled(): boolean {
+    const v = opt("OUTBOUND_SENDING_DISABLED")?.toLowerCase();
+    return v !== undefined && !["0", "false", "no", "non", "off"].includes(v);
+  },
   /** Clé HMAC DÉDIÉE de la liste de suppression (>= 32 caractères, distincte de SESSION_SECRET et ENCRYPTION_KEY). Absente : repli sûr et journalisé (voir src/lib/suppression.ts). */
   get suppressionKey() { return opt("SUPPRESSION_HMAC_KEY"); },
   /** Anciennes clés (séparées par des virgules), en lecture seule : les entrées qu'elles protègent restent reconnues pendant et après une rotation. */

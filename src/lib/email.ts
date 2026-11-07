@@ -154,6 +154,7 @@ export async function prepareFollowUpEmail(p: { workspaceId: string; leadId: str
  * Une erreur n'est classée « failed » que si le fournisseur a refusé explicitement ; toute autre erreur est « uncertain ».
  */
 export async function sendFollowUpEmail(p: { workspaceId: string; leadId: string; subject: string; body: string }): Promise<MarketingResult> {
+  if (env.outboundSendingDisabled) return { sent: false, reason: "Envois suspendus (interrupteur OUTBOUND_SENDING_DISABLED)." };
   const prep = await prepareFollowUpEmail(p);
   if (!prep.ok) return { sent: false, reason: prep.reason };
   const base = { workspaceId: p.workspaceId, leadId: prep.lead.id, to: prep.to, subject: p.subject, provider: prep.provider.id };

@@ -19,6 +19,9 @@ const rows: [string, boolean, string][] = [
   ["TIKTOK_APP_ID/SECRET", has("TIKTOK_APP_ID") && has("TIKTOK_APP_SECRET"), "TikTok Ads"],
 ];
 for (const [name, ok, use] of rows) console.log(`${ok ? "✅" : "⚠️ "} ${name.padEnd(46)} ${ok ? "configuré" : "absent"}  (${use})`);
+// Interrupteur global des envois (même règle que src/lib/env.ts : toute valeur non vide sauf 0/false/no/non/off l'active).
+const outbound = (process.env.OUTBOUND_SENDING_DISABLED ?? "").trim().replace(/^['"]|['"]$/g, "").trim().toLowerCase();
+if (outbound && !["0", "false", "no", "non", "off"].includes(outbound)) console.log("⚠️  OUTBOUND_SENDING_DISABLED actif : aucune relance e-mail n'est envoyée (elles restent en attente)  (interrupteur d'envoi)");
 // Prix historiques (optionnels) : chaque identifiant doit avoir le format price_… (aucune valeur n'est affichée).
 const badLegacy = ["STARTER", "GROWTH", "PRO"].filter((p) => (process.env[`STRIPE_PRICE_${p}_LEGACY`] ?? "").split(",").map((x) => x.trim()).filter(Boolean).some((x) => !/^price_\S+$/.test(x)));
 if (badLegacy.length) console.log(`⚠️  ${badLegacy.map((p) => `STRIPE_PRICE_${p}_LEGACY`).join(", ")} : identifiant au format inattendu (price_…)  (prix historiques)`);

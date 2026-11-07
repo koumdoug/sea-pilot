@@ -4,6 +4,7 @@ import { createActivityOnce, createTaskOnce, leaseEnd, newLeaseToken, runTx, TxA
 import { cancelPendingFollowUps, renderTemplate, type Step } from "./followups";
 import { LeadError, LeadStatusConflict, applyLeadStatusChange } from "./leads";
 import { runEmailFollowUp } from "./followup-send";
+import { env } from "./env";
 import type { RunOutcome } from "./followup-runtime";
 
 /**
@@ -212,6 +213,7 @@ export async function resolveFollowUp(p: ResolveInput): Promise<{ message: strin
       return { message: out.changed ? `Statut « ${target} » appliqué au prospect (décision humaine documentée).` : "Le prospect avait déjà ce statut : la relance est finalisée sans modification." };
     }
     case "resend": {
+      if (env.outboundSendingDisabled) throw new ReviewError("Les envois sont suspendus (interrupteur OUTBOUND_SENDING_DISABLED) : le renvoi est impossible tant qu'il est actif. La relance reste à examiner.");
       if (!isEmail || legacy) throw new ReviewError("Le renvoi n'est possible que pour un e-mail incertain d'une relance à examiner.");
       if (!verdictable || !last) throw new ReviewError("Le renvoi n'est possible que si le résultat de l'envoi est incertain et sans verdict humain.");
       if (!f.sequence || !f.sequence.active || !f.sequence.sendEmails) throw new ReviewError("La séquence est supprimée, inactive ou n'autorise plus l'envoi d'e-mails.");

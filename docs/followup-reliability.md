@@ -202,3 +202,13 @@ Changement de comportement (relu par rapport à l'ancien code) : le journal d'e-
 **Journaux** — *Défaut 4 (corrigé)* : le masquage du journal ne portait que sur les NOMS de champs ; un texte d'erreur (exception, message de base de données) contenant une adresse ou une empreinte sortait tel quel. Le masquage porte désormais aussi sur les valeurs (adresses e-mail, empreintes `h1:` et `erased:`). Un avertissement `suppression.unknown_key` (identifiants publics de clés et motifs de refus, jamais une valeur de clé) est émis une fois par espace. Vérifié : aucune sortie de journal ni ligne d'audit ne contient clé, adresse, nom ou empreinte pour la désinscription, l'effacement, le backfill, la rotation, la clé inconnue ou absente, et l'envoi accepté, refusé ou incertain.
 
 **Limites restantes** : rien n'a été migré sur une base réelle ; une adresse devinée reste confirmable par qui détient la clé ; les entrées `erased:` ne sont pas convertibles ; aucune durée de conservation n'est fixée.
+
+## 17. Interrupteur global des envois (`OUTBOUND_SENDING_DISABLED`)
+
+Permet de suspendre TOUS les envois sortants sans modifier le code ni la base : définir `OUTBOUND_SENDING_DISABLED=true` (toute valeur non vide sauf `0`, `false`, `no`, `non`, `off`) puis redémarrer le service. Une valeur douteuse suspend les envois.
+
+- **Relances e-mail automatiques** : ni sélectionnées ni réservées (`processDueFollowUps`, y compris la reprise des réservations expirées). Elles restent `pending`, sans tentative ni journal d'envoi, et repartent à la désactivation.
+- **Renvoi manuel** d'un e-mail incertain (écran « À examiner ») : refusé avant toute réservation ; la relance reste à examiner. `sendFollowUpEmail` (envoi direct, hors moteur) refuse également.
+- **Inchangé** : tâches, rappels et changements de statut ; e-mails système (mot de passe oublié, via la clé de la plateforme) ; synchronisations des plateformes publicitaires ; réconciliation Stripe.
+- **Tâche planifiée** : la réponse porte `outboundSendingDisabled: true`, `complete: false` et un journal `cron.outbound_sending_disabled` ; `npm run check:env` signale l'interrupteur actif.
+- **Limites** : l'interrupteur n'annule pas un envoi déjà commencé par un autre processus, et ne couvre pas un envoi fait hors de cette application (clé Resend du client utilisée ailleurs).

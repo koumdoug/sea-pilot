@@ -204,6 +204,21 @@ describe("contradiction entre le verdict humain et le résultat du fournisseur",
 });
 
 describe("renvoi manuel", () => {
+  it("interrupteur global des envois actif : le renvoi est refusé AVANT toute réservation (la relance reste à examiner, aucun appel fournisseur, aucune tentative ajoutée) ; levé, le renvoi fonctionne", async () => {
+    const f = await uncertainFixture();
+    f.p.behavior = async () => ({ id: "msg_2", httpStatus: 200 });
+    process.env.OUTBOUND_SENDING_DISABLED = "true";
+    try {
+      await expect(resolveFollowUp(await input(f, "resend", { confirm: true }))).rejects.toThrow(/suspendus/);
+    } finally { delete process.env.OUTBOUND_SENDING_DISABLED; }
+    expect(f.p.calls).toHaveLength(1);
+    expect((await row(f.fu.id)).status).toBe("needs_review");
+    expect(await logs(f.fu.id)).toHaveLength(1);
+    const out = await resolveFollowUp(await input(f, "resend", { confirm: true }));
+    expect(out.message).toMatch(/renvoyé/);
+    expect(f.p.calls).toHaveLength(2);
+  });
+
   it("exige la confirmation ; dans la fenêtre d'idempotence, la clé du premier envoi est réutilisée ; hors plafond ; historique distinct de chaque tentative", async () => {
     const f = await uncertainFixture();
     const first = (await logs(f.fu.id))[0];

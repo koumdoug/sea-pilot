@@ -10,6 +10,7 @@ import {
   newLeaseToken, prismaCode, requeueTx, runTx, toNeedsReview, type Db, type FollowUpRow, type RunOutcome,
 } from "./followup-runtime";
 import { runEmailFollowUp } from "./followup-send";
+import { env } from "./env";
 
 export const stepSchema = z.object({
   day: z.number().int().min(0).max(365),
@@ -168,8 +169,10 @@ function count(sum: ProcessSummary, o: RunOutcome) {
   }
 }
 
-const dueWhere = (now: Date): Prisma.FollowUpWhereInput => ({ status: "pending", dueAt: { lte: now }, OR: [{ retryAfter: null }, { retryAfter: { lte: now } }] });
-const expiredWhere = (now: Date): Prisma.FollowUpWhereInput => ({ status: "running", leaseToken: { not: null }, leaseUntil: { lt: now } });
+/** Interrupteur global des envois (OUTBOUND_SENDING_DISABLED) : les relances e-mail ne sont ni sélectionnées ni réservées (elles restent intactes, en attente) ; les autres actions continuent. */
+const heldEmails = (): Prisma.FollowUpWhereInput => (env.outboundSendingDisabled ? { action: { not: "email" } } : {});
+const dueWhere = (now: Date): Prisma.FollowUpWhereInput => ({ status: "pending", dueAt: { lte: now }, OR: [{ retryAfter: null }, { retryAfter: { lte: now } }], ...heldEmails() });
+const expiredWhere = (now: Date): Prisma.FollowUpWhereInput => ({ status: "running", leaseToken: { not: null }, leaseUntil: { lt: now }, ...heldEmails() });
 
 /** Marge de temps minimale (ms) requise avant de commencer une relance quand un délai global est imposé (appel fournisseur ≤ 20 s + écritures). */
 export const ITEM_RESERVE_MS = 30_000;

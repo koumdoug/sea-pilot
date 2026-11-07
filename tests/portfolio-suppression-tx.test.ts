@@ -275,6 +275,78 @@ describe("reassignProspect — une transaction : intérêt conservé ET prospect
     expect(await db.prospectProduct.count({ where: { prospectId: prospect.id } })).toBe(1);
     expect(await audits(workspaceId, "prospect.reassigned")).toBe(1);
   });
+
+  const reassign = (workspaceId: string, prospectId: string, toProductId: string, reason = "Travailleur autonome") => reassignProspect({ workspaceId, prospectId, toProductId, reason });
+  const interests = (prospectId: string) => db.prospectProduct.findMany({ where: { prospectId } });
+
+  it("P2002 persistante : arrêtée au nombre maximal de tentatives, erreur relancée, prospect non déplacé, aucun intérêt, aucun audit", async () => {
+    const { workspaceId, prospect, driver, nexa } = await setup();
+    const st = inject("prospectProduct", "create", () => prismaError("P2002"));
+    await expect(reassign(workspaceId, prospect.id, nexa.id)).rejects.toMatchObject({ code: "P2002" });
+    expect(st.attempts).toBe(1 + TX_MAX_RETRIES);
+    expect(sleeps).toHaveLength(TX_MAX_RETRIES);
+    expect((await row(prospect.id)).productId).toBe(driver.id);
+    expect(await interests(prospect.id)).toHaveLength(0);
+    expect(await audits(workspaceId, "prospect.reassigned")).toBe(0);
+  });
+
+  it("code de reprise historique conservé (P2034) ; autre code Prisma (P2003) : jamais repris, rien d'écrit", async () => {
+    const a = await setup();
+    const retried = inject("prospect", "update", (n) => (n === 1 ? prismaError("P2034") : null));
+    await reassign(a.workspaceId, a.prospect.id, a.nexa.id);
+    expect(retried.attempts).toBe(2);
+    expect((await row(a.prospect.id)).productId).toBe(a.nexa.id);
+    vi.restoreAllMocks(); setRetryTimingForTests({ sleep: async (ms) => { sleeps.push(ms); }, jitter: () => 0 });
+    const b = await setup();
+    const err = prismaError("P2003");
+    const once = inject("prospect", "update", () => err);
+    await expect(reassign(b.workspaceId, b.prospect.id, b.nexa.id)).rejects.toBe(err);
+    expect(once.attempts).toBe(1);
+    expect((await row(b.prospect.id)).productId).toBe(b.driver.id);
+    expect(await interests(b.prospect.id)).toHaveLength(0);
+  });
+
+  it("isolation : prospect d'un autre espace, produit cible d'un autre espace, prospect effacé → refusés, rien d'écrit (ni déplacement, ni intérêt, ni audit)", async () => {
+    const mine = await setup();
+    const foreign = await setup();
+    await expect(reassign(mine.workspaceId, foreign.prospect.id, mine.nexa.id)).rejects.toBeInstanceOf(PortfolioError); //  prospect d'un autre espace
+    await expect(reassign(mine.workspaceId, mine.prospect.id, foreign.nexa.id)).rejects.toThrow(/Produit introuvable/); //  produit cible d'un autre espace
+    await eraseProspect({ workspaceId: mine.workspaceId, prospectId: mine.prospect.id });
+    await expect(reassign(mine.workspaceId, mine.prospect.id, mine.nexa.id)).rejects.toThrow(/Prospect introuvable/); //     prospect effacé
+    expect((await row(foreign.prospect.id)).productId).toBe(foreign.driver.id);
+    expect(await interests(foreign.prospect.id)).toHaveLength(0);
+    expect(await audits(mine.workspaceId, "prospect.reassigned")).toBe(0);
+    expect(await audits(foreign.workspaceId, "prospect.reassigned")).toBe(0);
+  });
+
+  it("motif trop court (moins de 5 caractères) : refusé avant toute lecture ou écriture", async () => {
+    const { workspaceId, prospect, driver, nexa } = await setup();
+    await expect(reassign(workspaceId, prospect.id, nexa.id, "  ok ")).rejects.toThrow(/motif/);
+    expect((await row(prospect.id)).productId).toBe(driver.id);
+    expect(await interests(prospect.id)).toHaveLength(0);
+  });
+
+  it("le prospect est détaché de sa campagne en même temps qu'il est déplacé", async () => {
+    const { workspaceId, prospect, driver, nexa } = await setup();
+    const c = await db.outreachCampaign.create({ data: { workspaceId, productId: driver.id, name: "C1", channel: "email", status: "active" } });
+    await db.prospect.update({ where: { id: prospect.id }, data: { campaignId: c.id } });
+    await reassign(workspaceId, prospect.id, nexa.id);
+    expect(await row(prospect.id)).toMatchObject({ productId: nexa.id, campaignId: null });
+  });
+
+  it("prospect sans produit : attribué sans créer d'intérêt « ancienne attribution » ; intérêt déjà existant pour l'ancien produit : jamais dupliqué", async () => {
+    const { workspaceId, prospect, driver, nexa } = await setup();
+    await db.prospect.update({ where: { id: prospect.id }, data: { productId: null } });
+    await reassign(workspaceId, prospect.id, nexa.id);
+    expect((await row(prospect.id)).productId).toBe(nexa.id);
+    expect(await interests(prospect.id)).toHaveLength(0);
+    await db.prospect.update({ where: { id: prospect.id }, data: { productId: driver.id } });
+    await db.prospectProduct.create({ data: { workspaceId, prospectId: prospect.id, productId: driver.id, note: "déjà noté" } });
+    await reassign(workspaceId, prospect.id, nexa.id);
+    const rows = await interests(prospect.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].note).toBe("déjà noté");
+  });
 });
 
 describe("logReply — une transaction : ligne de contact ET effet (statut ou opposition)", () => {

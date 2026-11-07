@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { db } from "@/lib/db";
 import { createCheckoutSession, reconcileSubscription } from "@/lib/billing";
-import { claimStripeEvent } from "@/lib/stripe-events";
+import { StripeEventLeaseLostError, claimStripeEvent, completeStripeEvent, failStripeEvent } from "@/lib/stripe-events";
 import { QuotaError, createWithinLimit } from "@/lib/quota";
 import { PLANS } from "@/lib/plans";
 import { fake } from "./stripe-fake";
@@ -19,6 +19,33 @@ describe.skipIf(!isPg)("PostgreSQL — contention réelle sur les mécanismes de
     expect(r.filter((x) => x.kind === "claimed")).toHaveLength(1);
     expect(r.filter((x) => x.kind === "duplicate")).toHaveLength(59);
     expect(await db.stripeEvent.count({ where: { id: "evt_pg_stress" } })).toBe(1);
+    const winner = r.find((x) => x.kind === "claimed");
+    expect(winner && winner.kind === "claimed" && winner.leaseToken.length > 0).toBe(true);
+    expect((await db.stripeEvent.findUniqueOrThrow({ where: { id: "evt_pg_stress" } })).leaseToken).toBe(winner!.kind === "claimed" ? winner!.leaseToken : "");
+  });
+
+  it("registre d'événements, fencing : 40 reprises simultanées d'un bail expiré → un seul nouveau propriétaire ; l'ancien ne peut ni finaliser ni faire échouer", async () => {
+    const a = await claimStripeEvent("evt_pg_fence", "invoice.paid");
+    if (a.kind !== "claimed") throw new Error("prise en charge attendue");
+    await db.stripeEvent.update({ where: { id: "evt_pg_fence" }, data: { lockedUntil: new Date(Date.now() - 1000) } });
+    const r = await Promise.all(Array.from({ length: 40 }, () => claimStripeEvent("evt_pg_fence", "invoice.paid")));
+    const winners = r.filter((x) => x.kind === "claimed");
+    expect(winners).toHaveLength(1);
+    expect(r.filter((x) => x.kind === "duplicate")).toHaveLength(39);
+    const b = winners[0] as { kind: "claimed"; leaseToken: string };
+    expect(b.leaseToken).not.toBe(a.leaseToken);
+    expect(await db.stripeEvent.findUniqueOrThrow({ where: { id: "evt_pg_fence" } })).toMatchObject({ status: "processing", attempts: 2, leaseToken: b.leaseToken });
+    // A et B tentent d'écrire en même temps : seul B réussit, A est refusé, l'état final est celui de B.
+    const [ra, rb, rf] = await Promise.allSettled([
+      completeStripeEvent("evt_pg_fence", a.leaseToken, { outcome: "ignored", workspaceId: null, note: "A" }),
+      completeStripeEvent("evt_pg_fence", b.leaseToken, { outcome: "handled", workspaceId: null, note: "B" }),
+      failStripeEvent("evt_pg_fence", a.leaseToken, "A"),
+    ]);
+    expect(ra.status).toBe("rejected");
+    expect((ra as PromiseRejectedResult).reason).toBeInstanceOf(StripeEventLeaseLostError);
+    expect(rb.status).toBe("fulfilled");
+    expect(rf.status === "fulfilled" && rf.value).toBe(false);
+    expect(await db.stripeEvent.findUniqueOrThrow({ where: { id: "evt_pg_fence" } })).toMatchObject({ status: "processed", outcome: "handled", note: "B", leaseToken: null });
   });
 
   it("quota : 60 créations simultanées sous un plafond de 20 clés → exactement 20 (verrou de ligne PostgreSQL de l'espace)", async () => {

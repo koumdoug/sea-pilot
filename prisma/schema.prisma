@@ -169,6 +169,7 @@ model StripeEvent {
   status      String    @default("processing")
   attempts    Int       @default(1)
   lockedUntil DateTime?
+  leaseToken  String? // jeton de propriété du bail (fencing) : seul l'exécuteur qui le détient peut finaliser ou faire échouer l'événement ; NULL = ligne historique
   workspaceId String?
   outcome     String? // handled | ignored | needs_review
   note        String?

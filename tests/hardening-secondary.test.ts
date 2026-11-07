@@ -43,7 +43,9 @@ describe("V9 — registre des événements : purge sans jamais toucher à l'idem
     await row("evt_old_processing", "processing", 365, { lockedUntil: new Date(Date.now() - DAY) });
     await purgeStripeEvents();
     expect(await claimStripeEvent("evt_recent_processed", "invoice.paid")).toEqual({ kind: "duplicate", state: "processed" });
-    expect(await claimStripeEvent("evt_old_processing", "invoice.paid")).toEqual({ kind: "claimed" });
+    const taken = await claimStripeEvent("evt_old_processing", "invoice.paid");
+    expect(taken.kind).toBe("claimed");
+    expect(taken.kind === "claimed" && typeof taken.leaseToken === "string" && taken.leaseToken.length > 0).toBe(true);
   });
 
   it("alerte de revue manuelle : ouverte par un second abonnement détecté (audit) ou un événement needs_review, 30 jours, jamais pour un autre espace", async () => {

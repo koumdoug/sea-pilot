@@ -726,13 +726,13 @@ export async function handleStripeEvent(ev: StripeEvent, gw: StripeGateway = gat
   if (claim.kind === "duplicate") return { handled: false, duplicate: true, ...(claim.state === "processing" ? { inProgress: true } : {}) };
   try {
     const r = await processStripeEvent(ev, gw);
-    await completeStripeEvent(ev.id, { workspaceId: r.workspaceId, outcome: r.outcome, note: r.note });
+    await completeStripeEvent(ev.id, claim.leaseToken, { workspaceId: r.workspaceId, outcome: r.outcome, note: r.note }); // StripeEventLeaseLostError si le bail a été repris : jamais un faux succès
     // Trace d'audit informative (la déduplication, elle, repose sur le registre StripeEvent).
     if (r.workspaceId && r.outcome !== "ignored") await audit({ workspaceId: r.workspaceId, action: "billing.stripe_event", entity: "StripeEvent", entityId: ev.id, meta: { type: ev.type, outcome: r.outcome } });
     return { handled: r.outcome !== "ignored" };
   } catch (e) {
     log.error("stripe.webhook_failed", { type: ev.type, error: errMsg(e) });
-    await failStripeEvent(ev.id, errMsg(e)).catch((err) => log.error("stripe.event_ledger_failed", { error: errMsg(err) }));
+    await failStripeEvent(ev.id, claim.leaseToken, errMsg(e)).catch((err) => log.error("stripe.event_ledger_failed", { error: errMsg(err) })); // sans effet si le bail a été repris
     throw e;
   }
 }

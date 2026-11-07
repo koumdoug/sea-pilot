@@ -3,7 +3,7 @@ import { db } from "@/lib/db";
 import { POST as webhook } from "@/app/api/stripe/webhook/route";
 import { createHmac } from "node:crypto";
 import { BillingError, createCheckoutSession, handleStripeEvent, reconcileDueSubscriptions, reconcileSubscription, setStripeGateway, type StripeEvent } from "@/lib/billing";
-import { EVENT_LEASE_MS } from "@/lib/stripe-events";
+import { EVENT_LEASE_MS, StripeEventLeaseLostError, claimStripeEvent, completeStripeEvent, failStripeEvent } from "@/lib/stripe-events";
 import { entitlement, RENEWAL_GRACE_MS } from "@/lib/plans";
 import { entitlementForWorkspace } from "@/lib/free-access";
 import { fake } from "./stripe-fake";
@@ -366,5 +366,124 @@ describe("D4 — expiration locale et réconciliation avec Stripe", () => {
     expect(e.plan.id).toBe("pro");
     delete process.env.FREE_ACCESS_USER_IDS;
     expect((await entitlementForWorkspace(workspaceId, await sub(workspaceId))).active).toBe(false); // sans exemption : suspendu
+  });
+});
+
+describe("Fencing du bail du registre : seul le détenteur du jeton peut finaliser ou faire échouer l'événement", () => {
+  const ledgerRow = (id: string) => db.stripeEvent.findUniqueOrThrow({ where: { id } });
+  const expire = (id: string) => db.stripeEvent.update({ where: { id }, data: { lockedUntil: new Date(Date.now() - 1000) } });
+  const claimed = async (id: string) => { const c = await claimStripeEvent(id, "invoice.paid"); if (c.kind !== "claimed") throw new Error("prise en charge attendue"); return c.leaseToken; };
+  const done = { outcome: "handled" as const, workspaceId: null };
+
+  it("F1. bail expiré SANS reprise : l'exécuteur A peut encore finaliser avec son jeton", async () => {
+    const a = await claimed("evt_f1");
+    await expire("evt_f1");
+    await completeStripeEvent("evt_f1", a, done);
+    expect(await ledgerRow("evt_f1")).toMatchObject({ status: "processed", outcome: "handled", lockedUntil: null, leaseToken: null });
+  });
+
+  it("F2. reprise par B après expiration : jeton différent, tentative incrémentée, le jeton de A est remplacé", async () => {
+    const a = await claimed("evt_f2");
+    expect(a.length).toBeGreaterThan(0);
+    await expire("evt_f2");
+    const b = await claimed("evt_f2");
+    expect(b).not.toBe(a);
+    expect(await ledgerRow("evt_f2")).toMatchObject({ status: "processing", attempts: 2, leaseToken: b });
+  });
+
+  it("F3. A (ancien propriétaire) tente de finaliser : refusé avec l'erreur dédiée, l'événement reste détenu par B, qui peut finaliser", async () => {
+    const a = await claimed("evt_f3");
+    await expire("evt_f3");
+    const b = await claimed("evt_f3");
+    const err = await completeStripeEvent("evt_f3", a, { outcome: "ignored", workspaceId: null, note: "écriture de A" }).catch((e) => e);
+    expect(err).toBeInstanceOf(StripeEventLeaseLostError);
+    expect(err.eventId).toBe("evt_f3");
+    expect(await ledgerRow("evt_f3")).toMatchObject({ status: "processing", leaseToken: b, outcome: null, note: null }); // rien n'a été écrit par A
+    await completeStripeEvent("evt_f3", b, { outcome: "handled", workspaceId: null });
+    expect(await ledgerRow("evt_f3")).toMatchObject({ status: "processed", outcome: "handled", leaseToken: null });
+  });
+
+  it("F4. A tente de déclarer un ÉCHEC : sans effet (aucune erreur levée), B conserve son bail et finalise", async () => {
+    const a = await claimed("evt_f4");
+    await expire("evt_f4");
+    const b = await claimed("evt_f4");
+    const before = await ledgerRow("evt_f4");
+    expect(await failStripeEvent("evt_f4", a, "erreur de A")).toBe(false);
+    const after = await ledgerRow("evt_f4");
+    expect(after).toMatchObject({ status: "processing", leaseToken: b, error: null });
+    expect(after.lockedUntil!.getTime()).toBe(before.lockedUntil!.getTime()); // le bail de B n'est pas touché
+    await completeStripeEvent("evt_f4", b, done);
+    expect(await ledgerRow("evt_f4")).toMatchObject({ status: "processed" });
+  });
+
+  it("F4 bis. le détenteur du jeton déclare l'échec : `failed`, jeton vidé, erreur tronquée à 300 caractères ; la reprise suivante reçoit un NOUVEAU jeton", async () => {
+    const a = await claimed("evt_f4b");
+    expect(await failStripeEvent("evt_f4b", a, "x".repeat(500))).toBe(true);
+    const row = await ledgerRow("evt_f4b");
+    expect(row).toMatchObject({ status: "failed", lockedUntil: null, leaseToken: null });
+    expect(row.error).toHaveLength(300);
+    const again = await claimed("evt_f4b");
+    expect(again).not.toBe(a);
+    await expect(completeStripeEvent("evt_f4b", a, done)).rejects.toBeInstanceOf(StripeEventLeaseLostError); // l'ancien jeton ne revient jamais
+  });
+
+  it("F5. un événement déjà finalisé ne peut pas l'être une seconde fois (même avec l'ancien jeton)", async () => {
+    const a = await claimed("evt_f5");
+    await completeStripeEvent("evt_f5", a, done);
+    await expect(completeStripeEvent("evt_f5", a, { outcome: "ignored", workspaceId: null })).rejects.toBeInstanceOf(StripeEventLeaseLostError);
+    expect(await failStripeEvent("evt_f5", a, "tardif")).toBe(false);
+    expect(await ledgerRow("evt_f5")).toMatchObject({ status: "processed", outcome: "handled" });
+  });
+
+  it("F6. ligne historique `processing` SANS jeton (créée avant le correctif) : reprise possible après expiration, un jeton est attribué", async () => {
+    await db.stripeEvent.create({ data: { id: "evt_f6", type: "invoice.paid", status: "processing", lockedUntil: new Date(Date.now() - 1000) } });
+    expect((await ledgerRow("evt_f6")).leaseToken).toBeNull();
+    const t = await claimed("evt_f6");
+    expect(await ledgerRow("evt_f6")).toMatchObject({ status: "processing", attempts: 2, leaseToken: t });
+    await completeStripeEvent("evt_f6", t, done);
+  });
+
+  it("F7. une ligne historique sans jeton ne peut pas être finalisée par un jeton inventé", async () => {
+    await db.stripeEvent.create({ data: { id: "evt_f7", type: "invoice.paid", status: "processing", lockedUntil: new Date(Date.now() + EVENT_LEASE_MS) } });
+    await expect(completeStripeEvent("evt_f7", "jeton-invente", done)).rejects.toBeInstanceOf(StripeEventLeaseLostError);
+    expect(await ledgerRow("evt_f7")).toMatchObject({ status: "processing" });
+  });
+
+  /** Au moment où A tente de FINALISER, B a déjà repris l'événement (bail expiré puis nouvelle prise en charge) : la finalisation de A est la 1re écriture `processed` du registre. */
+  function takeOverWhenAFinalizes(id: string) {
+    const real = db.stripeEvent.updateMany.bind(db.stripeEvent) as unknown as (a: { data?: { status?: string } }) => Promise<unknown>;
+    const taken: { token: string | null } = { token: null };
+    vi.spyOn(db.stripeEvent, "updateMany").mockImplementation((async (a: { data?: { status?: string } }) => {
+      if (a?.data?.status === "processed" && taken.token === null) { await expire(id); taken.token = await claimed(id); }
+      return real(a);
+    }) as never);
+    return taken;
+  }
+
+  it("F8. handler : un exécuteur dont le bail est repris pendant le traitement ne renvoie PAS un succès ; l'état de B est intact", async () => {
+    const { workspaceId } = await setup(); fake.set("sub_1", { status: "active" });
+    const ev = event("customer.subscription.updated", subPayload(workspaceId), "evt_f8");
+    const taken = takeOverWhenAFinalizes("evt_f8");
+    const err = await send(ev).then(() => null, (e) => e); //        A traite, puis tente de finaliser alors que B détient le bail
+    vi.restoreAllMocks();
+    expect(err).toBeInstanceOf(StripeEventLeaseLostError); //          erreur remontée (la route répond 500) : jamais { handled: true }
+    expect(taken.token).not.toBeNull();
+    expect(await ledgerRow("evt_f8")).toMatchObject({ status: "processing", attempts: 2, leaseToken: taken.token, error: null }); // ni finalisé, ni marqué failed par A
+    await completeStripeEvent("evt_f8", taken.token!, done); //        B finalise normalement
+    expect(await ledgerRow("evt_f8")).toMatchObject({ status: "processed", outcome: "handled", leaseToken: null });
+    expect((await sub(workspaceId)).status).toBe("active");
+  });
+
+  it("F9. route webhook : la perte de bail d'un exécuteur répond 500 (Stripe réessaiera), jamais 200", async () => {
+    const { workspaceId } = await setup(); fake.set("sub_1", { status: "active" }); setStripeGateway(fake);
+    process.env.STRIPE_WEBHOOK_SECRET = "whsec_route";
+    const ev = event("customer.subscription.updated", subPayload(workspaceId), "evt_f9");
+    const payload = JSON.stringify(ev);
+    const t = Math.floor(Date.now() / 1000), sig = `t=${t},v1=${createHmac("sha256", "whsec_route").update(`${t}.${payload}`).digest("hex")}`;
+    const taken = takeOverWhenAFinalizes("evt_f9");
+    const res = await webhook(new Request("http://x/api/stripe/webhook", { method: "POST", headers: { "stripe-signature": sig }, body: payload }));
+    vi.restoreAllMocks();
+    expect(res.status).toBe(500);
+    expect(await ledgerRow("evt_f9")).toMatchObject({ status: "processing", leaseToken: taken.token }); // l'événement reste à B
   });
 });

@@ -39,9 +39,10 @@ Compatibilité avec des données existantes (sans toucher à rien de réel) : cr
 | Contrôle | Résultat |
 |---|---|
 | Moteur | PostgreSQL 18.6, conteneur nouveau étiqueté, base initialement vide (0 table) |
-| `prisma migrate deploy` (0001 à 0005) | 5 migrations appliquées sans erreur ; colonnes ajoutées nullables ; tables `StripeEvent` et `ContentItem` créées |
+| `prisma migrate deploy` (0001 à 0005, validation initiale) | 5 migrations appliquées sans erreur ; colonnes ajoutées nullables ; tables `StripeEvent` et `ContentItem` créées |
+| `prisma migrate deploy` (0001 à 0007) | Non revalidé sous PostgreSQL à la date de ce lot ; voir la mission de validation PostgreSQL |
 | Compatibilité des données | Ligne d'abonnement synthétique (forfait, statut, identifiants Stripe, période) intacte après `0004` et `0005` ; nouvelles colonnes nulles ; registre vide |
-| Suite complète `npm run test:pg` (dernier code) | 62 fichiers, **1 055 tests réussis**, 4 ignorés (contrat Stripe test, clé absente), sortie 0 |
+| Suite complète `npm run test:pg` (résultat historique, avant les migrations 0006–0007) | 62 fichiers, **1 055 tests réussis**, 4 ignorés (contrat Stripe test, clé absente), sortie 0 |
 | Activité réellement exécutée sur PostgreSQL (première exécution) | ≈ 21 800 transactions validées, ≈ 15 200 lignes insérées |
 | Charge (`tests/pg-stress.test.ts`) | 60 prises en charge simultanées d'un événement → 1 ; 60 créations sous un plafond de 20 clés → 20 ; 40 créations de séquences → plafond du forfait ; 30 demandes Checkout → 1 session et 1 client ; 25 synchronisations → jamais 2 lectures simultanées ; deux espaces ne se bloquent pas |
 | Mutations sur PostgreSQL | quota sans verrou → détecté (2 tests) ; réservation non exclusive → détectée ; bail non exclusif → détecté (après correction de l'instrument de mesure) |
@@ -89,4 +90,4 @@ Cartes de test publiques de Stripe : `4242 4242 4242 4242` (succès), `4000 0000
 3. Les neuf scénarios du § 3.2 déroulés sur un environnement de préproduction avec Stripe en mode test (non fait).
 4. Mesure des clés API existantes lue et décision de transition prise ([stripe-hardening.md](stripe-hardening.md) § 7) (non fait).
 5. Tâche planifiée configurée avec `CRON_SECRET` et une alerte sur `complete: false` (non vérifié : configuration Railway non consultée).
-6. Sauvegarde de la base, puis application des migrations `0003`, `0004` et `0005` ensemble (aucune n'est appliquée en production).
+6. Sauvegarde de la base, puis application des migrations `0003` à `0007` ensemble (aucune n'est appliquée en production).

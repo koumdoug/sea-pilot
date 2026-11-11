@@ -55,7 +55,7 @@ Points qui nécessitent une validation juridique :
 
 - Fichier : `prisma/postgres/migrations/0002_multi_product_portfolio/migration.sql` (SQLite : `prisma db push` en développement).
 - Contenu : 5 colonnes `productId` **nullables** (Audience, Offer, Campaign, LandingPage, Lead) + 8 nouvelles tables. Aucun `DROP`, `ALTER COLUMN`, `RENAME` ni `UPDATE`.
-- Application : `prisma migrate deploy` s'exécute déjà en pré-déploiement sur Railway. **Elle n'a pas été appliquée en production** et ne doit l'être qu'après autorisation explicite.
+- Application : `prisma migrate deploy` s'exécute déjà en pré-déploiement sur Railway (réglage hors dépôt, **non versionné** : voir [docs/deploiement-railway.md](docs/deploiement-railway.md), à vérifier dans le tableau de bord Railway). **Elle n'a pas été appliquée en production** et ne doit l'être qu'après autorisation explicite.
 - Retour arrière du code : revenir au commit précédent ; les colonnes et tables ajoutées restent inertes (ancien code les ignore).
 - Retour arrière de la base (si nécessaire) : supprimer les 8 tables et les 5 colonnes ajoutées — uniquement après sauvegarde et décision explicite.
 - Le script `scripts/gen-pg-schema.mjs` ne régénère plus jamais `0001_init` (déjà appliquée en production).

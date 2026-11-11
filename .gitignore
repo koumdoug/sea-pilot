@@ -28,3 +28,6 @@ Thumbs.db
 *.log
 .vercel
 .claude/
+
+# Fichier régénéré par `next dev` (instructions pour agents) : jamais versionné.
+AGENTS.md

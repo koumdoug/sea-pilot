@@ -125,7 +125,7 @@ Sortie : par forfait, nombre de clés, clés actives, clés actives utilisées s
 | `UPDATE … WHERE` concurrent | Sérialisé | Le second attend le verrou puis réévalue la condition (READ COMMITTED) |
 | Tri des NULL (`ORDER BY … ASC`) | NULL en premier | NULL en dernier (traité explicitement) |
 | Détection de doublon | `P2002` | `P2002` (identique) |
-| Migrations | `prisma db push` en test (l'historique `prisma/migrations` ne couvre pas 0002 à 0005) | `prisma migrate deploy`, migrations 0001 à 0005 |
+| Migrations | `prisma db push` en test (l'historique `prisma/migrations` ne couvre pas les évolutions PostgreSQL 0002 à 0005 et 0007 ; seule la 0006 a un équivalent SQLite) | `prisma migrate deploy --schema prisma/postgres/schema.prisma`, migrations 0001 à 0007 |
 
 Les garanties de concurrence sont donc validées par `npm run test:pg` (voir [validation-postgresql-stripe.md](validation-postgresql-stripe.md)).
 

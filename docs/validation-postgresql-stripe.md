@@ -40,9 +40,10 @@ Compatibilité avec des données existantes (sans toucher à rien de réel) : cr
 |---|---|
 | Moteur | PostgreSQL 18.6, conteneur nouveau étiqueté, base initialement vide (0 table) |
 | `prisma migrate deploy` (0001 à 0005, validation initiale) | 5 migrations appliquées sans erreur ; colonnes ajoutées nullables ; tables `StripeEvent` et `ContentItem` créées |
-| `prisma migrate deploy` (0001 à 0007) | Non revalidé sous PostgreSQL à la date de ce lot ; voir la mission de validation PostgreSQL |
+| `prisma migrate deploy` (0001 à 0007) | 7 migrations appliquées sans erreur sur une base neuve PostgreSQL 18.6 ; `migrate status` à jour ; `migrate diff` : aucune différence. Mise à jour 0006 → 0007 avec lignes synthétiques : lignes intactes, `leaseToken` nul. Journal : `pg-0001-0007-20261110.log`, SHA-256 `06547c3a0b50b81f4a5962585734d14a6eb0f88851a559eb6da21992cc581b9a`. Journal produit dans une session non indépendante. |
 | Compatibilité des données | Ligne d'abonnement synthétique (forfait, statut, identifiants Stripe, période) intacte après `0004` et `0005` ; nouvelles colonnes nulles ; registre vide |
 | Suite complète `npm run test:pg` (résultat historique, avant les migrations 0006–0007) | 62 fichiers, **1 055 tests réussis**, 4 ignorés (contrat Stripe test, clé absente), sortie 0 |
+| Suite complète `npm run test:pg` (code actuel, 2026-11-10) | 95 fichiers, **1 554 tests réussis**, 4 ignorés (contrat Stripe test, clé absente), 0 échec, deux exécutions consécutives, sortie 0 (même journal) |
 | Activité réellement exécutée sur PostgreSQL (première exécution) | ≈ 21 800 transactions validées, ≈ 15 200 lignes insérées |
 | Charge (`tests/pg-stress.test.ts`) | 60 prises en charge simultanées d'un événement → 1 ; 60 créations sous un plafond de 20 clés → 20 ; 40 créations de séquences → plafond du forfait ; 30 demandes Checkout → 1 session et 1 client ; 25 synchronisations → jamais 2 lectures simultanées ; deux espaces ne se bloquent pas |
 | Mutations sur PostgreSQL | quota sans verrou → détecté (2 tests) ; réservation non exclusive → détectée ; bail non exclusif → détecté (après correction de l'instrument de mesure) |

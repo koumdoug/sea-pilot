@@ -73,7 +73,7 @@ export async function addConversationAction(_: ActionState, fd: FormData): Promi
     await db.conversation.create({ data: { workspaceId: ctx.workspaceId, leadId: l.id, channel: d.channel, direction: d.channel === "note" ? "internal" : d.direction, subject: d.subject, body: d.body, authorId: ctx.user.id } });
     await db.leadActivity.create({ data: { workspaceId: ctx.workspaceId, leadId: l.id, type: "note", actorId: ctx.user.id, data: { channel: d.channel } } });
     // Premier contact sortant : le prospect passe automatiquement à « Contacté ».
-    if (l.status === "new" && d.direction === "outbound" && d.channel !== "note") await changeLeadStatus({ workspaceId: ctx.workspaceId, leadId: l.id, status: "contacted", actorId: ctx.user.id });
+    if (l.status === "new" && d.direction === "outbound" && d.channel !== "note") await changeLeadStatus({ workspaceId: ctx.workspaceId, leadId: l.id, status: "contacted", actorId: ctx.user.id, expectedFrom: "new" });
     revalidatePath(`/leads/${l.id}`);
     return { ok: true };
   });

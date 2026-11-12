@@ -135,8 +135,15 @@ export class LeadError extends Error {}
 export class LeadStatusConflict extends LeadError {}
 
 type LeadClient = Prisma.TransactionClient | typeof db;
-export type StatusChangeResult = { lead: Lead; from: string; changed: boolean; valueCorrected: boolean; terminal: boolean };
-type StatusChangeInput = { workspaceId: string; leadId: string; status: string; actorId?: string | null; value?: number | null; lostReason?: string | null };
+export type StatusChangeResult = { lead: Lead; from: string; changed: boolean; valueCorrected: boolean; terminal: boolean; skipped?: boolean };
+type StatusChangeInput = {
+  workspaceId: string; leadId: string; status: string; actorId?: string | null; value?: number | null; lostReason?: string | null;
+  /**
+   * Transition AUTOMATIQUE : n'est appliquée que si le statut courant est exactement celui-ci. Sinon (progression commerciale déjà enregistrée),
+   * rien n'est écrit (ni statut, ni historique) et le résultat est `skipped`. Un conflit à l'écriture n'est jamais réessayé (voir `changeLeadStatus`).
+   */
+  expectedFrom?: string;
+};
 
 /**
  * Écritures d'un changement de statut sur le client fourni (la base ou une TRANSACTION) : prospect, historique, client gagné, événement.
@@ -148,6 +155,10 @@ export async function applyLeadStatusChange(c: LeadClient, p: StatusChangeInput)
   const status = p.status as LeadStatus;
   const lead = await c.lead.findFirst({ where: { id: p.leadId, workspaceId: p.workspaceId, deletedAt: null } });
   if (!lead) throw new LeadError("Prospect introuvable.");
+  if (p.expectedFrom !== undefined && lead.status !== p.expectedFrom) {
+    // Transition automatique devenue sans objet : le prospect a progressé (ou déjà changé) depuis la décision. Aucune écriture.
+    return { lead, from: lead.status, changed: false, valueCorrected: false, terminal: false, skipped: true };
+  }
   if (lead.status === status) {
     // Rejeu (retry, double clic) : aucun nouvel événement ni historique. Seule une correction de montant d'un lead gagné est appliquée.
     if (status === "won" && p.value !== undefined && p.value !== null && p.value !== lead.value) {
@@ -188,13 +199,28 @@ export async function applyLeadStatusChange(c: LeadClient, p: StatusChangeInput)
 }
 
 export async function changeLeadStatus(p: StatusChangeInput): Promise<Lead> {
-  // Chemin manuel : en cas de modification concurrente, la décision explicite de l'utilisateur est réappliquée sur l'état réellement observé (au plus 3 essais).
+  // Toutes les écritures d'un essai (prospect, historique, client, événement) sont faites dans UNE transaction : tout ou rien.
+  // Un conflit est levé avant toute écriture (écriture conditionnelle en premier), la transaction annulée ne laisse donc aucun effet.
   let r: StatusChangeResult | undefined;
-  for (let i = 0; !r; i++) {
-    try { r = await applyLeadStatusChange(db, p); }
+  if (p.expectedFrom !== undefined) {
+    // Transition AUTOMATIQUE : un seul essai, jamais de reprise sur conflit. Le prospect est laissé tel quel (une décision humaine plus récente l'emporte).
+    try { r = await runTx((tx) => applyLeadStatusChange(tx, p)); }
     catch (e) {
       if (!(e instanceof LeadStatusConflict)) throw e;
-      if (i >= 2) throw new LeadError("Le prospect est modifié en continu : réessayez.");
+      const cur = await db.lead.findFirst({ where: { id: p.leadId, workspaceId: p.workspaceId, deletedAt: null } });
+      if (!cur) throw new LeadError("Prospect introuvable.");
+      log.info("lead.auto_status_skipped", { leadId: cur.id, expectedFrom: p.expectedFrom, to: p.status });
+      return cur;
+    }
+    if (r.skipped) log.info("lead.auto_status_skipped", { leadId: r.lead.id, expectedFrom: p.expectedFrom, to: p.status });
+  } else {
+    // Chemin manuel : en cas de modification concurrente, la décision explicite de l'utilisateur est réappliquée sur l'état réellement observé (au plus 3 essais).
+    for (let i = 0; !r; i++) {
+      try { r = await runTx((tx) => applyLeadStatusChange(tx, p)); }
+      catch (e) {
+        if (!(e instanceof LeadStatusConflict)) throw e;
+        if (i >= 2) throw new LeadError("Le prospect est modifié en continu : réessayez.");
+      }
     }
   }
   if (r.valueCorrected) {
@@ -361,7 +387,8 @@ export async function qualifyLeadService(p: { workspaceId: string; leadId: strin
   await db.analyticsEvent.create({ data: { workspaceId: p.workspaceId, type: "lead_qualified", leadId: lead.id, campaignId: lead.campaignId, meta: { score: q.score, level: q.level } } });
 
   if ((cfg?.autoQualify ?? true) && q.level === "hot" && lead.status === "new") {
-    await changeLeadStatus({ workspaceId: p.workspaceId, leadId: lead.id, status: "qualified", actorId: p.userId });
+    // Transition automatique : appliquée seulement si le prospect est TOUJOURS « new » au moment de l'écriture (la lecture du début est périmée).
+    await changeLeadStatus({ workspaceId: p.workspaceId, leadId: lead.id, status: "qualified", actorId: p.userId, expectedFrom: "new" });
   }
   return { qualification: q, record: rec, method };
 }
